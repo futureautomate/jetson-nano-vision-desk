@@ -11,6 +11,7 @@ Py3.6-safe (namedtuple, no dataclasses).
 import collections
 import logging
 import os
+import threading
 import time
 
 from src.hardware.board import gpio
@@ -42,6 +43,11 @@ class Engine(object):
         self._last_person_t = 0.0
         self._last_gem_t = 0.0
         self.decision = None
+        # the Gemini call is a blocking HTTPS POST — run it in a side thread so the
+        # vision loop never stalls; the result is picked up on a later frame.
+        self._gem_inflight = False
+        self._gem_pending = None      # decision dict waiting to be applied
+        self._gem_lock = threading.Lock()
         log.info("engine: detector=%s gpio=%s gemini=%s",
                  "real" if self.det.real else "mock",
                  "real" if gpio.real else "mock",
@@ -63,32 +69,56 @@ class Engine(object):
     def center_servo(self):
         self.act.pointer.center()
 
-    # --- internals --------------------------------------------------------
+    # --- Gemini brain (async) --------------------------------------------
+    def _grab_jpeg(self, img):
+        """Downscaled JPEG of the current frame for Gemini; cheap, done on the loop thread."""
+        if not (self.det.real and img is not None):
+            return None
+        try:
+            import jetson.utils as ju   # type: ignore
+            import cv2                   # type: ignore
+            arr = ju.cudaToNumpy(img)
+            small = cv2.resize(arr, (640, 360))
+            # videoSource frames are RGB(A); the JPEG encoder wants BGR
+            code = cv2.COLOR_RGBA2BGR if (small.ndim == 3 and small.shape[2] == 4) else cv2.COLOR_RGB2BGR
+            ok, buf = cv2.imencode(".jpg", cv2.cvtColor(small, code))
+            return buf.tobytes() if ok else None
+        except Exception as e:
+            log.debug("gemini frame grab failed: %s", e)
+            return None
+
+    def _gem_request(self, jpeg, dets):
+        """Runs in a side thread: the blocking HTTPS call. Stashes the result for the loop."""
+        try:
+            d = self.brain.think(jpeg, dets)
+        except Exception as e:
+            log.debug("gemini request failed: %s", e)
+            d = None
+        if d is not None:
+            with self._gem_lock:
+                self._gem_pending = d
+        self._gem_inflight = False
+
     def _maybe_ask_gemini(self, img, dets, now):
-        if not (self.brain.enabled and dets and (now - self._last_gem_t) >= self.gem_interval):
+        if not (self.brain.enabled and dets and not self._gem_inflight
+                and (now - self._last_gem_t) >= self.gem_interval):
             return
         self._last_gem_t = now
-        jpeg = None
-        if self.det.real and img is not None:
-            try:
-                import jetson.utils as ju   # type: ignore
-                import cv2                   # type: ignore
-                arr = ju.cudaToNumpy(img)
-                small = cv2.resize(arr, (640, 360))
-                # videoSource frames are RGB(A); the JPEG encoder wants BGR
-                code = cv2.COLOR_RGBA2BGR if (small.ndim == 3 and small.shape[2] == 4) else cv2.COLOR_RGB2BGR
-                ok, buf = cv2.imencode(".jpg", cv2.cvtColor(small, code))
-                jpeg = buf.tobytes() if ok else None
-            except Exception as e:
-                log.debug("gemini frame grab failed: %s", e)
-        d = self.brain.think(jpeg, dets)
-        if d is not None:
-            rising_alert = d["alert"] and not (self.decision and self.decision.get("alert"))
-            self.decision = d
-            log.info("[GEMINI] %s | lamp=%s point_at=%s alert=%s — %s",
-                     d["scene"], d["lamp"], d["point_at"], d["alert"], d["say"])
-            if rising_alert and not self.paused:
-                self.act.buzzer.alert()        # fire once on the transition, not every frame
+        self._gem_inflight = True
+        jpeg = self._grab_jpeg(img)
+        threading.Thread(target=self._gem_request, args=(jpeg, list(dets)), daemon=True).start()
+
+    def _apply_pending_gemini(self):
+        if self._gem_pending is None:
+            return
+        with self._gem_lock:
+            d, self._gem_pending = self._gem_pending, None
+        rising_alert = d["alert"] and not (self.decision and self.decision.get("alert"))
+        self.decision = d
+        log.info("[GEMINI] %s | lamp=%s point_at=%s alert=%s — %s",
+                 d["scene"], d["lamp"], d["point_at"], d["alert"], d["say"])
+        if rising_alert and not self.paused:
+            self.act.buzzer.alert()            # fire once on the transition, not every frame
 
     # --- the loop ---------------------------------------------------------
     def run(self):
@@ -106,7 +136,8 @@ class Engine(object):
                 target = Detector.most_prominent(dets, prefer_label=(self.decision or {}).get("point_at"))
                 status = "active" if people else "idle"
 
-                # brain overlay (periodic; may also fire a one-shot alert)
+                # brain: apply any finished async query, then maybe kick off a new one
+                self._apply_pending_gemini()
                 self._maybe_ask_gemini(img, dets, now)
                 if self.decision:
                     lamp_should = self.decision["lamp"]
