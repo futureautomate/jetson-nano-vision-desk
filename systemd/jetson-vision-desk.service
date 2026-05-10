@@ -1,0 +1,23 @@
+[Unit]
+Description=Jetson Nano Vision Desk — HUD + vision/reflex loop on the DWIN screen
+# the HUD needs an X session; on a stock JetPack desktop image that's the
+# graphical target's :0. If you boot to console, run the loop with --demo instead.
+After=graphical.target nv-l4t-bootloader-config.service
+Wants=graphical.target
+
+[Service]
+Type=simple
+User=jetson
+# the desktop session owns DISPLAY :0. XAUTHORITY depends on the display manager:
+#   gdm3   -> /run/user/1000/gdm/Xauthority   (JetPack 4.6 default; 1000 = `id -u jetson`)
+#   lightdm-> /home/jetson/.Xauthority  (or /var/run/lightdm/...)
+# check `echo $XAUTHORITY` inside the desktop session if it won't connect.
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/run/user/1000/gdm/Xauthority
+WorkingDirectory=/home/jetson/jetson-vision-desk
+ExecStart=/usr/bin/python3 -m src.main --hud
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical.target

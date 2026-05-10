@@ -56,6 +56,8 @@ See [docs/hardware.md](docs/hardware.md) for the authoritative pin map / wiring;
 ```bash
 ./deploy.sh             # same, from Git Bash / WSL / macOS
 ssh jetson 'cd ~/jetson-vision-desk && python3 -m src.main --selftest'   # exercise the actuators
+ssh jetson 'cd ~/jetson-vision-desk && python3 -m src.main --demo'       # vision → reflex loop, console output
+ssh jetson 'cd ~/jetson-vision-desk && DISPLAY=:0 XAUTHORITY=/run/user/1000/gdm/Xauthority python3 -m src.main --hud'  # ...with the HUD on the DWIN screen
 ```
 
 ## First-time Jetson setup
@@ -96,16 +98,17 @@ deploy.ps1 / deploy.sh         # Windows ↔ Jetson sync
 .env.example                   # copy → .env (gitignored): GEMINI_API_KEY, TELEGRAM_*, tuning
 docs/hardware.md               # authoritative pin map + wiring
 scripts/jetson_bootstrap.sh    # device setup (apt, pip, GPIO perms)
-systemd/                       # kiosk autostart for the HUD
+systemd/                       # autostart units (HUD + jetson_clocks) — see systemd/README.md
 src/
-  main.py                      # entry point — wires vision + reflexes + brain + HUD
+  main.py                      # entry point — --selftest / --demo / --hud
+  engine.py                    # the vision→reflex(→Gemini) loop, decoupled from UI; yields a Snapshot/frame
   hardware/board.py            # Jetson.GPIO wrapper w/ a mock fallback (runs anywhere)
   hardware/pins.py             # the pin map (single source of truth)
-  hardware/actuators.py        # relays, SG90 servo, buzzer
+  hardware/actuators.py        # relays, SG90 servo, buzzer (lazy PWM)
   vision/detector.py           # jetson-inference detectnet wrapper → detections stream
   brain/gemini.py              # periodic Gemini "what's the scene, what to do" call
-  ui/hud.py                    # PyQt5 480×800 HUD on the DWIN HDMI screen
-  notify/telegram.py           # alert snapshots
+  ui/hud.py                    # PyQt5 HUD for the DWIN HDMI screen (landscape/portrait adaptive)
+  notify/telegram.py           # alert snapshots (Phase 5 — not written yet)
 requirements.txt
 ```
 
@@ -116,12 +119,13 @@ Measured on the actual board (Nano B01, JetPack R32.7.6 / Ubuntu 18.04 / TRT 8.2
 - **detectnet ~4 FPS** with the prebuilt UFF SSD-Mobilenet-v1/v2/-Inception-v2 — all ~4 FPS; `Detect()` is ~250 ms of *TensorRT inference* (pre/post-process are <1 ms, the camera isn't the bottleneck). The "~20–30 FPS" in dusty-nv's docs was on JetPack 4.4–4.5 / TRT 7.x; TRT 8.2's UFF path is much slower on the Nano. 4 FPS is fine for the reflex layer (lamp/servo/alert) and the Gemini call is every N s anyway. If you ever need more: INT8 calibration (~2×, but needs a calib set), or a person-only DetectNet model (`pednet`/`multiped` — fast, but no 91-class COCO).
 - **Camera:** at ≤640×480 jetson-utils picks the C270's **raw YUY2** stream (no CPU JPEG decode); at 720p+ it falls back to MJPEG + a CPU `jpegdec`. Default capture is 640×480 (`CAMERA_WIDTH`/`CAMERA_HEIGHT`) — detectnet downscales to 300×300 regardless.
 - **Software PWM:** the buzzer (~2 kHz) and servo (50 Hz) PWM threads only run while actually beeping / moving — an always-on software-PWM thread needlessly burns CPU on the Nano.
-- `sudo nvpmodel -m 0` persists across reboots; `sudo jetson_clocks` does not — re-run it each boot (a `systemd` unit will land with the Phase-3 autostart).
+- `sudo nvpmodel -m 0` persists across reboots; `sudo jetson_clocks` does not — re-run it each boot (`systemd/jetson-clocks.service` does this).
+- **Power:** if the desktop pops *"System throttled due to Over-current"*, the 5 V rail is sagging — use the **5 V/4 A barrel jack + the `J48` jumper**, not micro-USB. Throttling also drags inference FPS down further.
 
 ## Build phases (mirrors the Notion tracker)
 0. ✅ Setup — reuse the GPIO layer + deploy workflow
 1. ✅ On-device vision — build `jetson-inference` from source, run `detectnet` on the C270, wrap it in Python
 2. ⏳ Reflex reactions — wire relays / servo / buzzer; person→lamp, box-centre→servo angle, alert→buzzer/LED; `--selftest`/`--demo` *(reflex logic verified on the relays; SG90 + buzzer not wired yet; perf-tuned above)*
-3. PyQt5 HUD on the DWIN screen — annotated feed, counters, FPS, Gemini panel, touch overrides, boot autostart
-4. Gemini brain — periodic `{scene, decision}` call, apply/override, graceful offline fallback
-5. Alerts + polish — Telegram snapshot, tuning, soak test
+3. ⏳ PyQt5 HUD on the DWIN screen — `src/ui/hud.py`: annotated feed, person/object counts, FPS, Gemini panel, touch buttons (pause / lamp AUTO·ON·OFF / center). Runs on the screen via `--hud`; `systemd/` units written. *Left: install/enable the units on the device, suppress desktop notifications for a clean kiosk, tame the twitchy capacitive touch.*
+4. Gemini brain — periodic `{scene, decision}` call, apply/override, graceful offline fallback *(wired through `engine.py`; just needs an API key in `.env` to exercise)*
+5. Alerts + polish — Telegram snapshot (`src/notify/telegram.py`), tuning, soak test

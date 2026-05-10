@@ -1,0 +1,13 @@
+[Unit]
+Description=Pin Jetson clocks to max (jetson_clocks)
+# `nvpmodel -m 0` persists across reboots; `jetson_clocks` does not — re-apply it each boot.
+After=nvpmodel.service
+Wants=nvpmodel.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/jetson_clocks
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

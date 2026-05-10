@@ -2,8 +2,8 @@
 
     python3 -m src.main             # print config (pin map, GPIO/Gemini availability)
     python3 -m src.main --selftest  # exercise every actuator (lamp, servo sweep, buzzer)
-    python3 -m src.main --demo       # the loop: detectnet -> reflex reactions (+ Gemini if a key is set).
-                                     #   prints to the console for now; the PyQt5 HUD comes in Phase 3.
+    python3 -m src.main --demo      # the loop: detectnet -> reflex reactions (+ Gemini if a key is set), console output
+    python3 -m src.main --hud       # same loop, but rendered on the PyQt5 HUD (the DWIN HDMI screen)
 
 Runs anywhere: on the Jetson it uses Jetson.GPIO + jetson-inference; on a laptop /
 CI (or with COMPANION_SIMULATE=1) it uses mock backends, so nothing here crashes.
@@ -75,82 +75,31 @@ def _selftest():
 
 
 def _demo():
-    """Vision -> reflex reactions, with Gemini overlaying decisions if a key is set.
-    Console output for now; Phase 3 swaps the console for the PyQt5 HUD on the DWIN screen."""
-    from src.hardware.actuators import Actuators
-    from src.vision.detector import Detector
-    from src.brain.gemini import GeminiBrain
-
-    no_person_timeout = float(os.environ.get("NO_PERSON_TIMEOUT_S", "20"))
-    gem_interval = float(os.environ.get("GEMINI_INTERVAL_S", "8"))
-    conf = float(os.environ.get("DETECT_CONFIDENCE", "0.5"))
-
-    act = Actuators()
-    det = Detector(camera="/dev/video0", confidence=conf)
-    brain = GeminiBrain()
-    print("== DEMO ==  detector:", "real" if det.real else "MOCK",
-          "| GPIO:", "real" if gpio.real else "MOCK", "| Gemini:", "on" if brain.enabled else "off")
-    if not det.real:
+    """Vision -> reflex reactions (+ Gemini overlay if a key is set), printed to the console.
+    Same loop the HUD runs — see src/engine.py."""
+    from src.engine import Engine
+    eng = Engine(draw_overlay=False)
+    print("== DEMO ==  detector:", "real" if eng.det.real else "MOCK",
+          "| GPIO:", "real" if gpio.real else "MOCK", "| Gemini:", "on" if eng.brain.enabled else "off")
+    if not eng.det.real:
         print("(jetson-inference not installed here — install it on the Nano; this loop will idle)")
-
-    last_person_t = 0.0
-    last_gem_t = 0.0
-    decision = None
+    idle = 0.0 if eng.det.real else 0.5
     try:
-        for img, dets in det.stream():
-            now = time.time()
-            people = Detector.count(dets, "person")
-            if people:
-                last_person_t = now
-
-            # --- reflex layer ---
-            lamp_should = (now - last_person_t) <= no_person_timeout and people > 0
-            target = Detector.most_prominent(dets, prefer_label=(decision or {}).get("point_at"))
-            # --- brain overlay (periodic) ---
-            if brain.enabled and (now - last_gem_t) >= gem_interval and dets:
-                last_gem_t = now
-                jpeg = None
-                if det.real and img is not None:
-                    try:
-                        import jetson.utils as ju  # type: ignore
-                        import cv2  # type: ignore
-                        arr = ju.cudaToNumpy(img)
-                        small = cv2.resize(arr, (640, 360))
-                        ok, buf = cv2.imencode(".jpg", cv2.cvtColor(small, cv2.COLOR_RGBA2BGR))
-                        jpeg = buf.tobytes() if ok else None
-                    except Exception:
-                        jpeg = None
-                d = brain.think(jpeg, dets)
-                if d is not None:
-                    decision = d
-                    print("[GEMINI] %s | lamp=%s point_at=%s alert=%s — %s" % (
-                        d["scene"], d["lamp"], d["point_at"], d["alert"], d["say"]))
-
-            if decision:
-                lamp_should = decision["lamp"]
-                if decision["point_at"]:
-                    t = next((x for x in dets if x["label"] == decision["point_at"]), None)
-                    if t:
-                        target = t
-                act.set_status(decision["status"])
-                if decision["alert"]:
-                    act.buzzer.alert()
-            else:
-                act.set_status("active" if people else "idle")
-
-            act.lamp.set(lamp_should)
-            if target:
-                act.pointer.point_at_fraction(target["cx"])
-
-            if dets:
-                print("fps=%.0f people=%d dets=%s lamp=%s servo=%.0f" % (
-                    det.fps(), people, [d["label"] for d in dets][:6], act.lamp.is_on, act.pointer.angle))
-            time.sleep(0.0 if det.real else 0.5)
-    except KeyboardInterrupt:
-        pass
+        for s in eng.run():
+            if s.dets:
+                print("fps=%.0f people=%d dets=%s lamp=%s servo=%.0f%s" % (
+                    s.fps, s.people, [d["label"] for d in s.dets][:6],
+                    s.state["lamp"], s.state["pointer_angle"], "  [PAUSED]" if s.paused else ""))
+            time.sleep(idle)
     finally:
-        act.shutdown(); det.close(); gpio.cleanup()
+        eng.shutdown()
     return 0
+
+
+def _hud():
+    """Launch the PyQt5 HUD on the DWIN HDMI screen (set HUD_WINDOWED=1 to run in a window)."""
+    from src.ui.hud import run_hud
+    return run_hud()
 
 
 def main(argv=None):
@@ -158,6 +107,7 @@ def main(argv=None):
     g = p.add_mutually_exclusive_group()
     g.add_argument("--selftest", action="store_true", help="exercise every actuator")
     g.add_argument("--demo", action="store_true", help="run the vision -> reactions loop (console output)")
+    g.add_argument("--hud", action="store_true", help="run the loop with the PyQt5 HUD on the DWIN screen")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
@@ -167,9 +117,10 @@ def main(argv=None):
         return _selftest()
     if args.demo:
         return _demo()
+    if args.hud:
+        return _hud()
     _print_config()
-    print("\nNext: install jetson-inference on the Nano (Phase 1), wire the actuators (Phase 2),")
-    print("then `python3 -m src.main --selftest` and `--demo`.")
+    print("\nRun:  --selftest (actuators) | --demo (vision loop, console) | --hud (vision loop, DWIN screen)")
     return 0
 
 

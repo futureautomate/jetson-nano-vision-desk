@@ -34,10 +34,13 @@ DEFAULT_HEIGHT = int(os.environ.get("CAMERA_HEIGHT") or 480)
 
 class Detector(object):
     def __init__(self, camera="/dev/video0", network=DEFAULT_NETWORK, confidence=0.5,
-                 width=None, height=None):
+                 width=None, height=None, overlay="none"):
         self.camera, self.network, self.confidence = camera, network, confidence
         self.width = DEFAULT_WIDTH if width is None else int(width)
         self.height = DEFAULT_HEIGHT if height is None else int(height)
+        # detectNet overlay drawn on the GPU frame: "none" (fastest — for headless / --demo)
+        # or e.g. "box,labels,conf" (for the HUD preview).
+        self.overlay = overlay or "none"
         self._net = None
         self._src = None
         self._utils = None
@@ -71,7 +74,7 @@ class Detector(object):
             img = self._src.Capture()
             if img is None:
                 continue
-            raw = self._net.Detect(img, overlay="none")
+            raw = self._net.Detect(img, overlay=self.overlay)
             W = float(img.width or self.width)
             H = float(img.height or self.height)
             dets = []
