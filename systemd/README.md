@@ -26,8 +26,20 @@ DISPLAY=:0 sudo systemctl start jetson-vision-desk.service
   `/var/run/lightdm/`) — check `echo $XAUTHORITY` inside the desktop session if it
   won't connect, or as a quick hack add `xhost +SI:localuser:jetson` to the session startup.
 - **Notifications:** the unit's `ExecStartPre` runs `gsettings set
-  org.gnome.desktop.notifications show-banners false` so desktop popups don't appear
-  over the fullscreen HUD (needs `DBUS_SESSION_BUS_ADDRESS`, also set in the unit).
+  org.gnome.desktop.notifications show-banners false` — but note this JetPack desktop
+  uses Ubuntu's `notify-osd`, *not* gnome-shell, so that key has no effect; it's there
+  for images that do use gnome-shell. The popup that actually matters on this board is
+  **"System throttled due to Over-current"** from `/usr/share/nvpmodel_indicator/`
+  (the power-mode tray applet). It's a real symptom — the 5 V rail is sagging; the fix
+  is the **5 V/4 A barrel jack + the `J48` jumper**, not micro-USB — but to stop it
+  drawing over the HUD, disable that autostart for the kiosk user:
+  ```bash
+  mkdir -p ~/.config/autostart
+  cp /etc/xdg/autostart/nvpmodel_indicator.desktop ~/.config/autostart/
+  printf 'Hidden=true\nX-GNOME-Autostart-enabled=false\n' >> ~/.config/autostart/nvpmodel_indicator.desktop
+  pkill -f nvpmodel_indicator   # NB: run this from a shell whose own command line doesn't contain that string, or use the PIDs
+  pkill -x notify-osd           # clears any popup already on screen (respawns on demand, harmless)
+  ```
 - **Boots to console?** Then there's no X — don't enable `jetson-vision-desk.service`;
   run `python3 -m src.main --demo` (console output) instead, or set up a minimal
   X session for the HUD.
