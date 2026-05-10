@@ -108,7 +108,7 @@ src/
   vision/detector.py           # jetson-inference detectnet wrapper → detections stream
   brain/gemini.py              # periodic Gemini "what's the scene, what to do" call
   ui/hud.py                    # PyQt5 HUD for the DWIN HDMI screen (landscape/portrait adaptive)
-  notify/telegram.py           # alert snapshots (Phase 5 — not written yet)
+  notify/telegram.py           # Telegram snapshot on a Gemini alert (async, cooldown-limited; dormant w/o a token)
 requirements.txt
 ```
 
@@ -127,5 +127,5 @@ Measured on the actual board (Nano B01, JetPack R32.7.6 / Ubuntu 18.04 / TRT 8.2
 1. ✅ On-device vision — build `jetson-inference` from source, run `detectnet` on the C270, wrap it in Python
 2. ⏳ Reflex reactions — wire relays / servo / buzzer; person→lamp, box-centre→servo angle, alert→buzzer/LED; `--selftest`/`--demo` *(reflex logic verified on the relays; SG90 + buzzer not wired yet; perf-tuned above)*
 3. ⏳ PyQt5 HUD on the DWIN screen — `src/ui/hud.py`: annotated feed, person/object counts, FPS, Gemini panel, touch buttons (pause / lamp AUTO·ON·OFF / center). Runs on the screen via `--hud`; `systemd/` units written. *Left: install/enable the units on the device, suppress desktop notifications for a clean kiosk, tame the twitchy capacitive touch.*
-4. Gemini brain — periodic `{scene, decision}` call, apply/override, graceful offline fallback *(wired through `engine.py`; just needs an API key in `.env` to exercise)*
-5. Alerts + polish — Telegram snapshot (`src/notify/telegram.py`), tuning, soak test
+4. ✅ Gemini brain — async `{scene, decision}` call every N s, overlays the reflexes (the reflex stays the *floor* — person→lamp on regardless), graceful offline/keyless fallback
+5. ⏳ Alerts + polish — Telegram snapshot on a Gemini `alert` (`src/notify/telegram.py`, async + cooldown — drop `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` in `.env` to enable). *Left: tuning (`DETECT_CONFIDENCE`, `NO_PERSON_TIMEOUT_S`, the Gemini prompt) and a soak test; sort the over-current power issue first.*

@@ -18,6 +18,7 @@ from src.hardware.board import gpio
 from src.hardware.actuators import Actuators
 from src.vision.detector import Detector
 from src.brain.gemini import GeminiBrain
+from src.notify.telegram import TelegramNotifier
 
 log = logging.getLogger("vision.engine")
 
@@ -38,6 +39,7 @@ class Engine(object):
         self.det = Detector(camera="/dev/video0", confidence=self.conf,
                             overlay=("box,labels,conf" if draw_overlay else "none"))
         self.brain = GeminiBrain()
+        self.notifier = TelegramNotifier()
         self.paused = False
         self.manual = {}              # e.g. {"lamp": True/False}; absent key = automatic
         self._last_person_t = 0.0
@@ -48,10 +50,11 @@ class Engine(object):
         self._gem_inflight = False
         self._gem_pending = None      # decision dict waiting to be applied
         self._gem_lock = threading.Lock()
-        log.info("engine: detector=%s gpio=%s gemini=%s",
+        log.info("engine: detector=%s gpio=%s gemini=%s telegram=%s",
                  "real" if self.det.real else "mock",
                  "real" if gpio.real else "mock",
-                 "on" if self.brain.enabled else "off")
+                 "on" if self.brain.enabled else "off",
+                 "on" if self.notifier.enabled else "off")
 
     # --- controls (called from the UI thread; plain bool/dict writes, no lock needed) ---
     def toggle_pause(self):
@@ -108,7 +111,7 @@ class Engine(object):
         jpeg = self._grab_jpeg(img)
         threading.Thread(target=self._gem_request, args=(jpeg, list(dets)), daemon=True).start()
 
-    def _apply_pending_gemini(self):
+    def _apply_pending_gemini(self, img):
         if self._gem_pending is None:
             return
         with self._gem_lock:
@@ -118,7 +121,9 @@ class Engine(object):
         log.info("[GEMINI] %s | lamp=%s point_at=%s alert=%s — %s",
                  d["scene"], d["lamp"], d["point_at"], d["alert"], d["say"])
         if rising_alert and not self.paused:
-            self.act.buzzer.alert()            # fire once on the transition, not every frame
+            self.act.buzzer.alert()                                  # fire once on the transition
+            self.notifier.alert(self._grab_jpeg(img),               # ...and a Telegram snapshot
+                                scene=d.get("scene", ""), note=d.get("say", ""))
 
     # --- the loop ---------------------------------------------------------
     def run(self):
@@ -139,7 +144,7 @@ class Engine(object):
                 target = Detector.most_prominent(dets, prefer_label=(self.decision or {}).get("point_at"))
 
                 # --- Gemini overlay: advisory — may *add* to the reflex, never undo it ---
-                self._apply_pending_gemini()
+                self._apply_pending_gemini(img)
                 self._maybe_ask_gemini(img, dets, now)
                 if self.decision:
                     lamp_should = lamp_should or self.decision["lamp"]   # can switch the lamp ON for other reasons
