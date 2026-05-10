@@ -12,10 +12,11 @@ requests
 python-telegram-bot
 
 # --- jetson-inference (detectnet/posenet) is NOT a pip package ---
-# Use NVIDIA's prebuilt Docker container `dustynv/jetson-inference:r32.7.1`
-# (handles all deps + downloads the prebuilt models), or build from source:
+# Build it from source on the Nano — installs the `jetson.inference` / `jetson.utils` Python
+# bindings system-wide, so the app runs natively. See README "First-time Jetson setup" and
+# scripts/jetson_bootstrap.sh for the exact steps (incl. the JetPack-4 libnpymath fixup).
 # https://github.com/dusty-nv/jetson-inference
-# Its Python bindings (`jetson.inference`, `jetson.utils`) come with it.
+# (Docker alternative: `dustynv/jetson-inference:r32.7.1`, but then GPIO/HUD/systemd run inside it.)
 
 # --- handy locally; OpenCV is preinstalled on JetPack as python3-opencv ---
 # opencv-python   # only if you want it in a non-Jetson dev env

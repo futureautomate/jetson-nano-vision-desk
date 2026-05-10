@@ -11,6 +11,7 @@ CI (or with COMPANION_SIMULATE=1) it uses mock backends, so nothing here crashes
 import argparse
 import logging
 import os
+import re
 import time
 
 from src.hardware import pins
@@ -31,7 +32,10 @@ def _load_env():
                     if not line or line.startswith("#") or "=" not in line:
                         continue
                     k, v = line.split("=", 1)
-                    os.environ.setdefault(k.strip(), v.strip())
+                    # strip dotenv-style inline comments (a '#' preceded by whitespace),
+                    # so `KEY=20   # note` -> "20" and not "20   # note"
+                    v = re.split(r"\s#", v.strip(), 1)[0].strip()
+                    os.environ.setdefault(k.strip(), v)
             logging.getLogger("vision").info("loaded env from %s", path)
             return path
     return None

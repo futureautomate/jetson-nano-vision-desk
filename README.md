@@ -62,13 +62,29 @@ ssh jetson 'cd ~/jetson-vision-desk && python3 -m src.main --selftest'   # exerc
 
 ```bash
 # 1. get the code there (deploy.ps1, or `git clone` the public repo)
+
 # 2. OS + Python deps, GPIO perms:
 ssh jetson 'cd ~/jetson-vision-desk && bash scripts/jetson_bootstrap.sh'
-# 3. jetson-inference (NVIDIA's prebuilt Docker container handles the deps; first run downloads the models):
-#    docker run --runtime nvidia -it --rm --network host -v ~/jetson-vision-desk:/work \
-#      --device /dev/video0 dustynv/jetson-inference:r32.7.1
-#    (or build from source: https://github.com/dusty-nv/jetson-inference)
+#    (log out / back in once so the gpio/video groups take effect)
+
+# 3. build jetson-inference FROM SOURCE — this installs the `jetson.inference` / `jetson.utils`
+#    Python bindings system-wide, so the app runs natively (GPIO + the Qt HUD + systemd all stay
+#    simple — a container would force all of that inside it). On the Jetson:
+git clone --depth=1 https://github.com/dusty-nv/jetson-inference ~/jetson-inference
+cd ~/jetson-inference
+git submodule update --init --recursive utils tools/camera-capture c/plugins/pose
+#    JetPack 4.x quirk: the apt numpy hides libnpymath.a from the linker — expose it first:
+sudo ln -sf /usr/lib/python3/dist-packages/numpy/core/lib/libnpymath.a /usr/lib/aarch64-linux-gnu/libnpymath.a
+mkdir build && cd build
+cmake -DBUILD_INTERACTIVE=NO ../          # downloads the default models, skips PyTorch, no dialogs
+make -j2 && sudo make install && sudo ldconfig
+python3 -c 'import jetson.inference, jetson.utils; print("bindings ok")'
+#    (first detectNet(...) call downloads SSD-Mobilenet-v2 + builds a TensorRT engine, ~5 min, cached after)
+#    (Docker alternative: dustynv/jetson-inference:r32.7.1 — but then GPIO/HUD/systemd all have to run inside it)
+
 # 4. (optional) put the Gemini key in ~/jetson-vision-desk-data/.env  (see .env.example)
+
+# 5. perf tip: the Nano boots in 5W mode, which caps detectnet FPS — `sudo nvpmodel -m 0 && sudo jetson_clocks`
 ```
 
 The Nano: JetPack 4.6.x / Ubuntu 18.04 / Python 3.6 / CUDA 10.2 — on-device TensorRT vision is its strength; the Gemini call is just HTTPS so Py 3.6 is fine. (Anything needing a modern OS/Node — like NemoClaw — does **not** run on this board; that's why the companion project moved to a Pi 5.)
