@@ -11,7 +11,7 @@ An NVIDIA **Jetson Nano** with a webcam that watches your desk, sees who/what's 
 
 **Layer 1 — on-device vision (works offline):** `jetson-inference` `detectnet` (SSD-Mobilenet-v2, **prebuilt — zero training**) runs on the Nano's 128-core GPU → bounding boxes + labels each frame → GPIO reactions (lamp on when a person's at the desk, the servo arm tracks the most prominent object, buzzer/LED on alert). On JetPack 4.6.3 / TensorRT 8.2.1 the prebuilt UFF model clocks ~4 FPS (the often-quoted ~20–30 FPS was on older JetPack/TRT) — plenty for "is a person here / point at the prominent thing" reflexes; see [Performance](#performance).
 
-**Layer 2 — cloud "brain" (periodic, reasons about the scene):** every N seconds a downscaled frame + the detections go to **Gemini 2.5-flash** (multimodal, a plain HTTPS call — fine on the Nano's Python 3.6) → it returns a one-line **scene description** + a structured **action decision** that can override the simple reflex rules. Falls back to pure local reflexes if the network/API is down.
+**Layer 2 — cloud "brain" (periodic, reasons about the scene):** every N seconds a downscaled frame + the detections go to **Gemini 2.5-flash** (multimodal, a plain HTTPS call — fine on the Nano's Python 3.6) → it returns a one-line **scene description** + a structured **action decision** (`{scene, lamp, point_at, alert, status, say}`). It's *advisory* — it can add to the reflexes (and owns the servo target / status LED / alerts) but never undoes "person → lamp on"; the call is async so the vision loop never stalls; and it falls back to pure local reflexes if the network/API is down or there's no key. (Note: the Gemini free tier's daily quota runs out under an 8 s interval — enable billing on the AI Studio project, or raise `GEMINI_INTERVAL_S`, for sustained use.)
 
 ```
 USB webcam (C270)
@@ -21,9 +21,10 @@ jetson-inference detectnet ─► detections ─► REFLEX rules ─► GPIO (la
    │                              │                                 ▲
    │ (every N s: frame+dets)       └─────────────────────────────────┼──► PyQt5 HUD on the DWIN HDMI screen
    ▼                              │                                 │
-Gemini 2.5-flash (multimodal) ─► {scene, decision} ───────────────────┘   (overrides reflexes when it says so)
+Gemini 2.5-flash (multimodal) ─► {scene, decision} ───────────────────┘   (advisory overlay on the reflexes)
    │
-   └─► Telegram (snapshot on "unrecognized person lingering")
+   └─► Telegram ── snapshot when a person arrives ("N person(s) at the desk — lamp on")
+                └─ snapshot on a Gemini alert ("unfamiliar person lingering" …)
 ```
 
 ## Hardware (all in inventory — Jetson Nano 40-pin header, BOARD pins)
@@ -108,7 +109,7 @@ src/
   vision/detector.py           # jetson-inference detectnet wrapper → detections stream
   brain/gemini.py              # periodic Gemini "what's the scene, what to do" call
   ui/hud.py                    # PyQt5 HUD for the DWIN HDMI screen (landscape/portrait adaptive)
-  notify/telegram.py           # Telegram snapshot on a Gemini alert (async, cooldown-limited; dormant w/o a token)
+  notify/telegram.py           # Telegram snapshots — person arrives + Gemini alert (async, separate cooldowns; dormant w/o a token)
 requirements.txt
 ```
 
@@ -122,10 +123,18 @@ Measured on the actual board (Nano B01, JetPack R32.7.6 / Ubuntu 18.04 / TRT 8.2
 - `sudo nvpmodel -m 0` persists across reboots; `sudo jetson_clocks` does not — re-run it each boot (`systemd/jetson-clocks.service` does this).
 - **Power:** if the desktop pops *"System throttled due to Over-current"*, the 5 V rail is sagging — use the **5 V/4 A barrel jack + the `J48` jumper**, not micro-USB. Throttling also drags inference FPS down further.
 
+## Status
+
+All five build phases are **done in code** and the whole stack runs on the Nano via systemd autostart — `jetson-vision-desk.service` (the HUD + the vision/reflex/Gemini/Telegram loop on the DWIN screen) and `jetson-clocks.service` (pins max clocks on boot); the over-current desktop popup is disabled (see `systemd/README.md`). What's left is hardware/ops on the bench:
+
+- **Power** — move to the 5 V/4 A barrel jack + the `J48` jumper (the over-current is real; it's the main thing capping FPS and a hang risk).
+- **Wire the SG90** (pin 33 — its own 5–6 V rail, common ground) and the **buzzer** (pin 32), then calibrate `angle_min/max` & `duty_min/max` in `src/hardware/pins.py` to the camera's FOV. *(For a quick demo without a separate rail you can run the servo off the Nano's 5 V pin, but with the board already over-current that risks a brownout — dry-run `--selftest` first.)*
+- **Optional:** a Telegram bot token in `.env` to enable the alerts; tuning (`DETECT_CONFIDENCE` / `NO_PERSON_TIMEOUT_S` / the Gemini prompt, all via `.env`); a soak run; tame the twitchy capacitive touch; exercise `deploy.ps1` (so far the code's been `scp`'d).
+
 ## Build phases (mirrors the Notion tracker)
-0. ✅ Setup — reuse the GPIO layer + deploy workflow
-1. ✅ On-device vision — build `jetson-inference` from source, run `detectnet` on the C270, wrap it in Python
-2. ⏳ Reflex reactions — wire relays / servo / buzzer; person→lamp, box-centre→servo angle, alert→buzzer/LED; `--selftest`/`--demo` *(reflex logic verified on the relays; SG90 + buzzer not wired yet; perf-tuned above)*
-3. ⏳ PyQt5 HUD on the DWIN screen — `src/ui/hud.py`: annotated feed, person/object counts, FPS, Gemini panel, touch buttons (pause / lamp AUTO·ON·OFF / center). Runs on the screen via `--hud`; `systemd/` units written. *Left: install/enable the units on the device, suppress desktop notifications for a clean kiosk, tame the twitchy capacitive touch.*
-4. ✅ Gemini brain — async `{scene, decision}` call every N s, overlays the reflexes (the reflex stays the *floor* — person→lamp on regardless), graceful offline/keyless fallback
-5. ⏳ Alerts + polish — Telegram snapshot on a Gemini `alert` (`src/notify/telegram.py`, async + cooldown — drop `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` in `.env` to enable). *Left: tuning (`DETECT_CONFIDENCE`, `NO_PERSON_TIMEOUT_S`, the Gemini prompt) and a soak test; sort the over-current power issue first.*
+0. ✅ Setup — GPIO layer + deploy workflow (reused from the companion repo)
+1. ✅ On-device vision — `jetson-inference` built from source, `detectnet` (SSD-Mobilenet-v2) on the C270, wrapped in `src/vision/detector.py`
+2. ✅ Reflex reactions — person→lamp (with a `NO_PERSON_TIMEOUT_S` grace period), box-centre→servo angle, status LED, alert→buzzer; `--selftest`/`--demo`; perf-tuned. *(Verified on the relays; SG90 + buzzer not yet physically wired.)*
+3. ✅ PyQt5 HUD on the DWIN screen — `src/ui/hud.py`: annotated feed, person/object counts, FPS, Gemini scene/decision panel, touch buttons (pause / lamp AUTO·ON·OFF / center); runs via `--hud`; `systemd/` units installed & enabled; notification popup silenced. *(Twitchy touch still a minor wart.)*
+4. ✅ Gemini brain — async `{scene, decision}` call every N s, advisory overlay on the reflexes (reflex stays the *floor*), graceful offline/keyless/quota fallback
+5. ✅ Alerts — Telegram snapshot on a Gemini `alert` **and** when a person arrives (`src/notify/telegram.py`, async, separate cooldowns; drop `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` in `.env` to enable). *Polish/tuning/soak ongoing.*
