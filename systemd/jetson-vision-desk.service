@@ -14,7 +14,11 @@ User=jetson
 # check `echo $XAUTHORITY` inside the desktop session if it won't connect.
 Environment=DISPLAY=:0
 Environment=XAUTHORITY=/run/user/1000/gdm/Xauthority
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
 WorkingDirectory=/home/jetson/jetson-vision-desk
+# kiosk: silence GNOME notification banners so they don't pop over the fullscreen HUD
+# (leading '-' = don't fail the unit if gsettings/dbus isn't there)
+ExecStartPre=-/usr/bin/gsettings set org.gnome.desktop.notifications show-banners false
 ExecStart=/usr/bin/python3 -m src.main --hud
 Restart=on-failure
 RestartSec=5
