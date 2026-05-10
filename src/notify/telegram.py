@@ -26,15 +26,19 @@ class TelegramNotifier(object):
     def __init__(self, token=None, chat_id=None, cooldown_s=None, timeout_s=15):
         self.token = (token or os.environ.get("TELEGRAM_BOT_TOKEN", "")).strip()
         self.chat_id = (chat_id or os.environ.get("TELEGRAM_CHAT_ID", "")).strip()
-        try:
-            self.cooldown_s = float(cooldown_s if cooldown_s is not None
-                                    else os.environ.get("TELEGRAM_ALERT_COOLDOWN_S") or 300)
-        except (TypeError, ValueError):
-            self.cooldown_s = 300.0
+
+        def _f(env, default):
+            try:
+                return float(os.environ.get(env) or default)
+            except (TypeError, ValueError):
+                return float(default)
+        self.cooldown_s = float(cooldown_s) if cooldown_s is not None else _f("TELEGRAM_ALERT_COOLDOWN_S", 300)
+        self.person_cooldown_s = _f("TELEGRAM_PERSON_COOLDOWN_S", self.cooldown_s)
         self.timeout_s = timeout_s
         self.enabled = bool(self.token and self.chat_id)
         self._requests = None
-        self._last_sent = 0.0
+        self._last_alert = 0.0       # separate cooldown buckets so events don't suppress alerts
+        self._last_event = 0.0
         self._lock = threading.Lock()
         if self.enabled:
             try:
@@ -46,21 +50,31 @@ class TelegramNotifier(object):
         log.info("Telegram alerts %s%s", "enabled" if self.enabled else "disabled",
                  "" if self.enabled else " (no TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID)")
 
-    def alert(self, jpeg_bytes, scene="", note=""):
-        """Queue an alert message (snapshot + caption) — non-blocking, cooldown-limited."""
-        if not self.enabled:
-            return
+    def _throttled(self, attr, cooldown):
+        """True if we should skip this send (still within `cooldown` of the last one of this kind)."""
         now = time.time()
         with self._lock:
-            if now - self._last_sent < self.cooldown_s:
-                log.debug("telegram alert suppressed (cooldown)")
-                return
-            self._last_sent = now
+            if now - getattr(self, attr) < cooldown:
+                return True
+            setattr(self, attr, now)
+            return False
+
+    def alert(self, jpeg_bytes, scene="", note=""):
+        """Queue an *alarm* message (snapshot + caption) — non-blocking, cooldown-limited."""
+        if not self.enabled or self._throttled("_last_alert", self.cooldown_s):
+            return
         caption = ("⚠ Vision Desk alert\n" + (scene or "") + (("\n— " + note) if note else "")).strip()
         threading.Thread(target=self._send, args=(jpeg_bytes, caption), daemon=True).start()
 
+    def event(self, jpeg_bytes, text):
+        """Queue a *routine* event message (snapshot + text), e.g. 'person at the desk' —
+        non-blocking, with its own cooldown bucket so events don't suppress alerts."""
+        if not self.enabled or self._throttled("_last_event", self.person_cooldown_s):
+            return
+        threading.Thread(target=self._send, args=(jpeg_bytes, "👁 " + (text or "Vision Desk")), daemon=True).start()
+
     def message(self, text):
-        """Send a plain text message (e.g. a startup ping or a soak-test note)."""
+        """Send a plain text message (e.g. a startup ping or a soak-test note) — no cooldown."""
         if not self.enabled:
             return
         threading.Thread(target=self._send, args=(None, text), daemon=True).start()

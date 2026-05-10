@@ -50,6 +50,7 @@ class Engine(object):
         self._gem_inflight = False
         self._gem_pending = None      # decision dict waiting to be applied
         self._gem_lock = threading.Lock()
+        self._person_present = False   # sticky "someone's at the desk" — for edge-triggered notifications
         log.info("engine: detector=%s gpio=%s gemini=%s telegram=%s",
                  "real" if self.det.real else "mock",
                  "real" if gpio.real else "mock",
@@ -136,11 +137,12 @@ class Engine(object):
                 if people:
                     self._last_person_t = now
 
-                # --- reflex layer: fast, local, and the FLOOR (a person at the desk
-                #     turns the lamp on right away — never wait on / be overridden by Gemini) ---
-                person_now = people > 0 and (now - self._last_person_t) <= self.no_person_timeout
+                # --- reflex layer: fast, local, the FLOOR. "person present" is sticky for
+                #     NO_PERSON_TIMEOUT_S after the last detection — debounces one-frame drops
+                #     and acts as the lamp's grace period. A person at the desk -> lamp on now. ---
+                person_now = (now - self._last_person_t) <= self.no_person_timeout
                 lamp_should = person_now
-                status = "active" if people else "idle"
+                status = "active" if person_now else "idle"
                 target = Detector.most_prominent(dets, prefer_label=(self.decision or {}).get("point_at"))
 
                 # --- Gemini overlay: advisory — may *add* to the reflex, never undo it ---
@@ -166,6 +168,14 @@ class Engine(object):
                     self.act.lamp.set(lamp_should)
                     if target:
                         self.act.pointer.point_at_fraction(target["cx"])
+
+                # --- Telegram: ping (snapshot) on the rising edge of "person here, lamp on" ---
+                arrived = person_now and not self._person_present and lamp_should and not self.paused
+                self._person_present = person_now
+                if arrived:
+                    n = max(1, people)
+                    self.notifier.event(self._grab_jpeg(img),
+                                        "%d person%s at the desk — lamp on" % (n, "" if n == 1 else "s"))
 
                 yield Snapshot(img=img, dets=dets, people=people, fps=self.det.fps(),
                                state=self.act.state(), gemini=self.decision,
