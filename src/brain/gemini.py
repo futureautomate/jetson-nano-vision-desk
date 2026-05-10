@@ -29,8 +29,10 @@ _SYSTEM = (
     ' "alert": <true|false>,           // raise a buzzer/notification alert?\n'
     ' "status": "idle"|"active"|"alert",\n'
     ' "say": "<short note for the on-screen HUD>"}\n'
-    "Be conservative: only set alert=true for something genuinely unusual (e.g. an unfamiliar "
-    "person lingering and facing the camera). lamp=true when a person is present and engaged."
+    "Note: the device ALREADY switches the desk lamp on automatically whenever a person is at the "
+    "desk — set lamp=true only if extra light would help even otherwise (e.g. someone reading in a "
+    "dim room); lamp=false is fine the rest of the time. Be conservative with alert=true: only for "
+    "something genuinely unusual (e.g. an unfamiliar person lingering and facing the camera)."
 )
 
 

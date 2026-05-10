@@ -131,17 +131,21 @@ class Engine(object):
                 if people:
                     self._last_person_t = now
 
-                # reflex baseline
-                lamp_should = (now - self._last_person_t) <= self.no_person_timeout and people > 0
-                target = Detector.most_prominent(dets, prefer_label=(self.decision or {}).get("point_at"))
+                # --- reflex layer: fast, local, and the FLOOR (a person at the desk
+                #     turns the lamp on right away — never wait on / be overridden by Gemini) ---
+                person_now = people > 0 and (now - self._last_person_t) <= self.no_person_timeout
+                lamp_should = person_now
                 status = "active" if people else "idle"
+                target = Detector.most_prominent(dets, prefer_label=(self.decision or {}).get("point_at"))
 
-                # brain: apply any finished async query, then maybe kick off a new one
+                # --- Gemini overlay: advisory — may *add* to the reflex, never undo it ---
                 self._apply_pending_gemini()
                 self._maybe_ask_gemini(img, dets, now)
                 if self.decision:
-                    lamp_should = self.decision["lamp"]
+                    lamp_should = lamp_should or self.decision["lamp"]   # can switch the lamp ON for other reasons
                     status = self.decision["status"]
+                    if person_now and status == "idle":
+                        status = "active"                                # don't dim below the person-present floor
                     if self.decision["point_at"]:
                         t = next((x for x in dets if x["label"] == self.decision["point_at"]), None)
                         if t:
