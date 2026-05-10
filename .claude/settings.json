@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__claude_ai_Notion__notion-fetch",
+      "mcp__claude_ai_Notion__notion-update-page",
+      "mcp__claude_ai_Notion__notion-search",
+      "Bash(git branch *)",
+      "Bash(gh auth *)",
+      "Bash(gh repo *)",
+      "Bash(git remote *)",
+      "Bash(git push *)",
+      "Bash(ssh jetson *)",
+      "Bash(tar -czf - --exclude=.git --exclude=__pycache__ --exclude='*.pyc' --exclude=.venv --exclude=.vscode --exclude=.idea --exclude=.claude --exclude=data --exclude=snapshots --exclude='*.log' -C \"/d/Projects/jetson-nano-vision-desk\" .)"
+    ]
+  }
+}
