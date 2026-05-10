@@ -15,14 +15,14 @@ on any pin). active_low matches typical cheap relay boards — confirm on the be
 ACTUATORS = {
     "lamp": {
         "kind": "actuator", "iface": "digital_out", "pin": 16, "bcm": 23,
-        "model": "mechanical relay ch1", "active_low": True,   # CONFIRM on bench
+        "model": "mechanical relay ch1", "active_low": True,   # confirmed on bench 2026-05-10 (relay clicks on LOW)
         "label": "Desk lamp",
         "wiring": "relay IN1 -> pin 16; module VCC 5V, GND common. No AC load (relay click + onboard LED is the proof).",
         "desc": "ON when a person is at the desk; OFF after NO_PERSON_TIMEOUT_S.",
     },
     "mood_light": {
         "kind": "actuator", "iface": "digital_out", "pin": 18, "bcm": 24,
-        "model": "LED strip via mechanical relay ch2", "active_low": True,  # CONFIRM
+        "model": "LED strip via mechanical relay ch2", "active_low": True,  # confirmed on bench 2026-05-10 (same board as ch1)
         "label": "Status light",
         "wiring": "LED strip switched by relay IN2 -> pin 18; strip from its own supply, common ground.",
         "desc": "Status colour: idle / active / alert. (If the strip is addressable WS2812, switch to an SPI MOSI drive instead.)",

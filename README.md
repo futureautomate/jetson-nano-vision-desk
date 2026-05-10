@@ -9,7 +9,7 @@ An NVIDIA **Jetson Nano** with a webcam that watches your desk, sees who/what's 
 
 ## How it works — two layers
 
-**Layer 1 — on-device vision (fast reflexes, works offline):** `jetson-inference` `detectnet` (SSD-Mobilenet-v2, **prebuilt — zero training**) runs ~20–30 FPS on the Nano's 128-core GPU → bounding boxes + labels every frame → instant GPIO reactions (lamp on when a person's at the desk, the servo arm tracks the most prominent object, buzzer/LED on alert).
+**Layer 1 — on-device vision (works offline):** `jetson-inference` `detectnet` (SSD-Mobilenet-v2, **prebuilt — zero training**) runs on the Nano's 128-core GPU → bounding boxes + labels each frame → GPIO reactions (lamp on when a person's at the desk, the servo arm tracks the most prominent object, buzzer/LED on alert). On JetPack 4.6.3 / TensorRT 8.2.1 the prebuilt UFF model clocks ~4 FPS (the often-quoted ~20–30 FPS was on older JetPack/TRT) — plenty for "is a person here / point at the prominent thing" reflexes; see [Performance](#performance).
 
 **Layer 2 — cloud "brain" (periodic, reasons about the scene):** every N seconds a downscaled frame + the detections go to **Gemini 2.5-flash** (multimodal, a plain HTTPS call — fine on the Nano's Python 3.6) → it returns a one-line **scene description** + a structured **action decision** that can override the simple reflex rules. Falls back to pure local reflexes if the network/API is down.
 
@@ -109,10 +109,19 @@ src/
 requirements.txt
 ```
 
+## Performance
+
+Measured on the actual board (Nano B01, JetPack R32.7.6 / Ubuntu 18.04 / TRT 8.2.1, `nvpmodel -m 0` + `jetson_clocks`):
+
+- **detectnet ~4 FPS** with the prebuilt UFF SSD-Mobilenet-v1/v2/-Inception-v2 — all ~4 FPS; `Detect()` is ~250 ms of *TensorRT inference* (pre/post-process are <1 ms, the camera isn't the bottleneck). The "~20–30 FPS" in dusty-nv's docs was on JetPack 4.4–4.5 / TRT 7.x; TRT 8.2's UFF path is much slower on the Nano. 4 FPS is fine for the reflex layer (lamp/servo/alert) and the Gemini call is every N s anyway. If you ever need more: INT8 calibration (~2×, but needs a calib set), or a person-only DetectNet model (`pednet`/`multiped` — fast, but no 91-class COCO).
+- **Camera:** at ≤640×480 jetson-utils picks the C270's **raw YUY2** stream (no CPU JPEG decode); at 720p+ it falls back to MJPEG + a CPU `jpegdec`. Default capture is 640×480 (`CAMERA_WIDTH`/`CAMERA_HEIGHT`) — detectnet downscales to 300×300 regardless.
+- **Software PWM:** the buzzer (~2 kHz) and servo (50 Hz) PWM threads only run while actually beeping / moving — an always-on software-PWM thread needlessly burns CPU on the Nano.
+- `sudo nvpmodel -m 0` persists across reboots; `sudo jetson_clocks` does not — re-run it each boot (a `systemd` unit will land with the Phase-3 autostart).
+
 ## Build phases (mirrors the Notion tracker)
-0. Setup — reuse the GPIO layer + deploy workflow
-1. On-device vision — install `jetson-inference`, run `detectnet` on the C270, wrap it in Python
-2. Reflex reactions — wire relays / servo / buzzer; person→lamp, box-centre→servo angle, alert→buzzer/LED; `--selftest`
+0. ✅ Setup — reuse the GPIO layer + deploy workflow
+1. ✅ On-device vision — build `jetson-inference` from source, run `detectnet` on the C270, wrap it in Python
+2. ⏳ Reflex reactions — wire relays / servo / buzzer; person→lamp, box-centre→servo angle, alert→buzzer/LED; `--selftest`/`--demo` *(reflex logic verified on the relays; SG90 + buzzer not wired yet; perf-tuned above)*
 3. PyQt5 HUD on the DWIN screen — annotated feed, counters, FPS, Gemini panel, touch overrides, boot autostart
 4. Gemini brain — periodic `{scene, decision}` call, apply/override, graceful offline fallback
 5. Alerts + polish — Telegram snapshot, tuning, soak test

@@ -38,13 +38,15 @@ class _Relay(object):
 
 
 class _Servo(object):
-    """SG90 on software PWM. set_angle(0..180). Detaches (duty 0) after a moment to stop jitter."""
+    """SG90 on software PWM. set_angle(0..180). A short while after each move the PWM thread
+    is *stopped* (not just zeroed) — the servo relaxes (no jitter/hum) AND we don't leave a
+    software-PWM thread spinning at 50 Hz stealing CPU from the vision loop."""
 
     def __init__(self, pin, hz=50, angle_min=0, angle_max=180, duty_min=2.5, duty_max=12.5, hold_s=0.6):
-        self.pin, self.angle_min, self.angle_max = pin, angle_min, angle_max
+        self.pin, self.hz, self.angle_min, self.angle_max = pin, hz, angle_min, angle_max
         self.duty_min, self.duty_max, self.hold_s = duty_min, duty_max, hold_s
         self._pwm = gpio.pwm(pin, hz)
-        self._pwm.start(0)
+        self._running = False
         self._angle = (angle_min + angle_max) / 2.0
         self._lock = threading.Lock()
         self._detach_timer = None
@@ -57,7 +59,12 @@ class _Servo(object):
     def set_angle(self, angle):
         with self._lock:
             self._angle = max(self.angle_min, min(self.angle_max, float(angle)))
-            self._pwm.ChangeDutyCycle(self._angle_to_duty(self._angle))
+            duty = self._angle_to_duty(self._angle)
+            if self._running:
+                self._pwm.ChangeDutyCycle(duty)
+            else:
+                self._pwm.start(duty)
+                self._running = True
             log.debug("servo -> %.0f deg", self._angle)
             if self._detach_timer is not None:
                 self._detach_timer.cancel()
@@ -67,7 +74,12 @@ class _Servo(object):
 
     def _detach(self):
         with self._lock:
-            self._pwm.ChangeDutyCycle(0)   # stop sending pulses -> servo relaxes, no jitter/hum
+            if self._running:
+                try:
+                    self._pwm.stop()       # stop pulses -> servo relaxes; no lingering PWM thread
+                except Exception:
+                    pass
+                self._running = False
 
     def center(self):
         self.set_angle((self.angle_min + self.angle_max) / 2.0)
@@ -83,33 +95,38 @@ class _Servo(object):
     def angle(self): return self._angle
 
     def stop(self):
-        try:
-            if self._detach_timer is not None:
-                self._detach_timer.cancel()
-            self._pwm.stop()
-        except Exception:
-            pass
+        with self._lock:
+            try:
+                if self._detach_timer is not None:
+                    self._detach_timer.cancel()
+                if self._running:
+                    self._pwm.stop()
+                    self._running = False
+            except Exception:
+                pass
 
 
 class _Buzzer(object):
-    """Passive buzzer driven with PWM (a square-wave tone)."""
+    """Passive buzzer driven with PWM (a square-wave tone). The PWM thread only runs while a
+    beep is actually sounding — an always-on software-PWM thread at ~2 kHz wakes 2000x/sec and
+    needlessly burns CPU (fighting the GIL with the vision loop), with the pin held low anyway."""
 
     def __init__(self, pin, default_hz=2000):
         self.pin, self.default_hz = pin, default_hz
-        self._pwm = gpio.pwm(pin, default_hz)
-        self._pwm.start(0)
+        self._pwm = gpio.pwm(pin, default_hz)   # created, but NOT started — no idle thread
         self._lock = threading.Lock()
 
-    def _tone(self, hz, on):
-        with self._lock:
-            if on:
-                self._pwm.ChangeFrequency(max(50, int(hz)))
-                self._pwm.ChangeDutyCycle(50)
-            else:
-                self._pwm.ChangeDutyCycle(0)
-
     def _beep_blocking(self, dur, hz):
-        self._tone(hz, True); time.sleep(dur); self._tone(hz, False)
+        with self._lock:
+            try:
+                self._pwm.ChangeFrequency(max(50, int(hz)))
+                self._pwm.start(50)
+                time.sleep(dur)
+            finally:
+                try:
+                    self._pwm.stop()
+                except Exception:
+                    pass
 
     def beep(self, dur=0.12, hz=None, blocking=False):
         hz = hz or self.default_hz
@@ -125,7 +142,7 @@ class _Buzzer(object):
                 self._beep_blocking(0.18, hz); time.sleep(0.06)
         threading.Thread(target=run, daemon=True).start()
 
-    def off(self): self._tone(self.default_hz, False)
+    def off(self): pass  # nothing is held open between beeps
 
     def stop(self):
         try: self._pwm.stop()

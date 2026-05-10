@@ -37,8 +37,8 @@ Software PWM via `Jetson.GPIO` (works on any pin) — fine for a 50 Hz servo and
 BOARD 7, 12, 13, 15, 19, 21, 23, 24, 26, 29, 31, 35, 36, 37, 38, 40 are free. I²C-1 on pins 3 (SDA) / 5 (SCL) is free (e.g. a BMP180 if you ever want ambient data on the HUD). UART on pins 8/10.
 
 ## TODO before/while wiring
-- [ ] Bench-confirm relay polarity (active-LOW vs active-HIGH) → `active_low` in `pins.py`
-- [ ] Confirm the C270 enumerates as `/dev/video0` (`ls /dev/video*`, `v4l2-ctl --list-devices`)
-- [ ] Print/attach a pointer arm to the SG90 horn; calibrate `angle_min/angle_max` (and `duty_min/duty_max`) so the sweep matches the camera's ~55° FOV
-- [ ] Wire the servo's separate 5–6 V rail with a common ground
-- [ ] Then: `python3 -m src.main --selftest` (actuators) and `--demo` (vision loop)
+- [x] Bench-confirm relay polarity → active-LOW (confirmed 2026-05-10 via `--selftest`/`--demo`; `active_low: True` in `pins.py`)
+- [x] Confirm the C270 enumerates as `/dev/video0` (yes — `UVC Camera (046d:0825)`, MJPEG, decoded on CPU → capture runs at 640×480 by default; see `CAMERA_WIDTH`/`HEIGHT`)
+- [ ] Print/attach a pointer arm to the SG90 horn; calibrate `angle_min/angle_max` (and `duty_min/duty_max`) so the sweep matches the camera's FOV
+- [ ] Wire the servo's separate 5–6 V rail with a common ground (SG90 not yet wired)
+- [x] First light: `python3 -m src.main --selftest` (actuators) and `--demo` (camera → detectnet → reflexes) both verified on the Nano

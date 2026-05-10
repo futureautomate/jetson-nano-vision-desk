@@ -17,6 +17,7 @@ Usage:
     det.close()
 """
 import logging
+import os
 import time
 
 log = logging.getLogger("vision.detector")
@@ -24,12 +25,19 @@ log = logging.getLogger("vision.detector")
 # Default model: SSD-Mobilenet-v2 (COCO-ish 91 classes), bundled with jetson-inference.
 DEFAULT_NETWORK = "ssd-mobilenet-v2"
 
+# Capture resolution. detectnet downscales to 300x300 internally, so the camera res only
+# affects USB bandwidth + the (CPU!) MJPEG decode on the Nano — 640x480 is ~3x cheaper to
+# decode than 720p with no real loss for detection. Override via CAMERA_WIDTH/CAMERA_HEIGHT.
+DEFAULT_WIDTH = int(os.environ.get("CAMERA_WIDTH") or 640)
+DEFAULT_HEIGHT = int(os.environ.get("CAMERA_HEIGHT") or 480)
+
 
 class Detector(object):
     def __init__(self, camera="/dev/video0", network=DEFAULT_NETWORK, confidence=0.5,
-                 width=1280, height=720):
+                 width=None, height=None):
         self.camera, self.network, self.confidence = camera, network, confidence
-        self.width, self.height = width, height
+        self.width = DEFAULT_WIDTH if width is None else int(width)
+        self.height = DEFAULT_HEIGHT if height is None else int(height)
         self._net = None
         self._src = None
         self._utils = None
@@ -39,10 +47,10 @@ class Detector(object):
             import jetson.utils as ju          # type: ignore
             self._ji, self._utils = ji, ju
             self._net = ji.detectNet(network, ["--confidence=%s" % confidence])
-            self._src = ju.videoSource(camera, argv=["--input-width=%d" % width,
-                                                     "--input-height=%d" % height])
+            self._src = ju.videoSource(camera, argv=["--input-width=%d" % self.width,
+                                                     "--input-height=%d" % self.height])
             self.real = True
-            log.info("jetson-inference detectNet '%s' on %s", network, camera)
+            log.info("jetson-inference detectNet '%s' on %s at %dx%d", network, camera, self.width, self.height)
         except Exception as e:
             log.warning("jetson-inference unavailable (%s) — Detector is a no-op mock", e)
 
