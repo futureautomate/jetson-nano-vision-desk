@@ -109,6 +109,10 @@ def _build_hud_class():
             self._landscape = sz.width() >= sz.height()
             if windowed:
                 self.setFixedSize(800, 480) if self._landscape else self.setFixedSize(480, 800)
+            else:
+                # kiosk: drop window decorations so we look fullscreen even if the WM ignores
+                # the FullScreen hint at autostart time (graphical.target races the desktop session)
+                self.setWindowFlags(Qt.FramelessWindowHint)
             self._build_ui()
 
             self.worker = _build_worker_class()(engine)
@@ -278,7 +282,11 @@ def run_hud():
         hud.show()
     else:
         app.setOverrideCursor(QtCore.Qt.BlankCursor)
-        hud.showFullScreen()
+        # show() first to let the WM map the window, THEN ask for fullscreen on the next event-loop
+        # tick — calling showFullScreen() too early at boot (before mutter/compiz is fully up) makes
+        # the WM ignore the hint and the window opens at default size with decorations.
+        hud.show()
+        QtCore.QTimer.singleShot(200, hud.showFullScreen)
 
     # let Ctrl-C / SIGTERM close cleanly (Qt only checks Python signals between events,
     # so a heartbeat timer is needed to actually deliver them)
