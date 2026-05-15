@@ -235,9 +235,10 @@ def _build_hud_class():
                     self._show_hint("Seeing %s — but waiting for the Gemini rate-limit window to clear (%.0fs).\n"
                                     "Tap IDENTIFY NOW to bypass." % (s.watch_label or "object", backoff))
                 else:
-                    self.status.setText("LOOKING %.1fs" % s.watch_elapsed); self.status.setStyleSheet(_PILL_WATCHING)
-                    self._show_hint("Looking at %s... hold steady (%.1fs)" %
-                                    (s.watch_label or "?", s.watch_elapsed))
+                    remaining = max(0.0, self.engine.stable_s - s.watch_elapsed)
+                    self.status.setText("LOOKING %.1fs" % remaining); self.status.setStyleSheet(_PILL_WATCHING)
+                    self._show_hint("Looking at %s — hold steady, %.1fs to go" %
+                                    (s.watch_label or "object", remaining))
             elif s.state == "IDENTIFYING":
                 self.status.setText("IDENTIFYING…"); self.status.setStyleSheet(_PILL_IDENTIFYING)
                 self._show_hint("Identifying… (asking Gemini)")

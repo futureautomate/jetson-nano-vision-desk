@@ -41,9 +41,14 @@ _IGNORE_LABELS = {"person"}
 
 class Engine(object):
     def __init__(self, draw_overlay=False):
-        self.stable_s = float(os.environ.get("STABLE_S", "2.0"))      # how long the same label must persist before we ask
-        self.clear_s  = float(os.environ.get("CLEAR_S",  "3.0"))      # how long the frame must be clear before re-arming
-        self.conf     = float(os.environ.get("DETECT_CONFIDENCE", "0.4"))
+        # how long the same label must persist in frame before we ask Gemini
+        self.stable_s   = float(os.environ.get("STABLE_S",    "5.0"))
+        # how long the frame must be clear (no prominent object) before re-arming for the next scan
+        self.clear_s    = float(os.environ.get("CLEAR_S",     "3.0"))
+        # minimum time the result stays on screen, so the user has time to read it even if they
+        # whip the object away the moment Gemini returns
+        self.show_min_s = float(os.environ.get("SHOW_MIN_S",  "5.0"))
+        self.conf       = float(os.environ.get("DETECT_CONFIDENCE", "0.4"))
 
         self.det = Detector(camera="/dev/video0", confidence=self.conf,
                             overlay=("box,labels,conf" if draw_overlay else "none"))
@@ -51,11 +56,12 @@ class Engine(object):
         self.notifier = TelegramNotifier()
 
         # state machine
-        self.state         = S_IDLE
-        self.watch_label   = None
-        self.watch_start   = 0.0
-        self.result        = None
-        self.absent_since  = None
+        self.state           = S_IDLE
+        self.watch_label     = None
+        self.watch_start     = 0.0
+        self.result          = None
+        self.result_shown_at = 0.0
+        self.absent_since    = None
 
         # async Gemini plumbing
         self._gem_inflight = False
@@ -139,6 +145,8 @@ class Engine(object):
             return
         self.result = res
         self.state = S_SHOWING
+        self.result_shown_at = time.time()
+        self.absent_since = None
         log.info("[GEMINI] %s  (%s)  — %s", res.get("name"), res.get("kind"), res.get("summary"))
         try:
             self.notifier.identified(jpeg, res)
@@ -189,19 +197,17 @@ class Engine(object):
                     pass  # waiting for _apply_pending — runs on every iteration above
 
                 elif self.state == S_SHOWING:
+                    # The result is locked on screen. NO new Gemini calls fire from here — even
+                    # if a different object appears — until the frame's been clear for clear_s AND
+                    # we've shown the result for at least show_min_s (so the user has time to read it).
+                    show_elapsed = now - self.result_shown_at
                     if not prominent:
                         if self.absent_since is None:
                             self.absent_since = now
-                        elif (now - self.absent_since) >= self.clear_s:
+                        elif (now - self.absent_since) >= self.clear_s and show_elapsed >= self.show_min_s:
                             self.clear()
                     else:
                         self.absent_since = None
-                        if prominent["label"] != self.watch_label:
-                            # a new, different object — restart the watch (auto-rescan)
-                            self.state = S_WATCHING
-                            self.watch_label = prominent["label"]
-                            self.watch_start = now
-                            self.result = None
 
                 watch_elapsed = (now - self.watch_start) if self.state == S_WATCHING else 0.0
                 backoff_remaining = max(0.0, self._gem_blocked_until - now)
