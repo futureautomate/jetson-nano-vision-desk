@@ -220,13 +220,24 @@ def _build_hud_class():
                 self.feed.setText("camera offline\n(jetson-inference not running)")
 
             # state pill + info panel
+            backoff = getattr(s, "backoff_remaining", 0.0)
             if s.state == "IDLE":
-                self.status.setText("IDLE"); self.status.setStyleSheet(_PILL_IDLE)
-                self._show_hint("Hold up an object to identify it.")
+                if backoff > 0:
+                    self.status.setText("RATE-LIMITED %.0fs" % backoff); self.status.setStyleSheet(_PILL_WATCHING)
+                    self._show_hint("Gemini's free-tier rate limit hit — retrying in %.0fs.\n"
+                                    "(Tap IDENTIFY NOW to bypass and try immediately.)" % backoff)
+                else:
+                    self.status.setText("IDLE"); self.status.setStyleSheet(_PILL_IDLE)
+                    self._show_hint("Hold up an object to identify it.")
             elif s.state == "WATCHING":
-                self.status.setText("LOOKING %.1fs" % s.watch_elapsed); self.status.setStyleSheet(_PILL_WATCHING)
-                self._show_hint("Looking at %s... hold steady (%.1fs)" %
-                                (s.watch_label or "?", s.watch_elapsed))
+                if backoff > 0:
+                    self.status.setText("RATE-LIMITED %.0fs" % backoff); self.status.setStyleSheet(_PILL_WATCHING)
+                    self._show_hint("Seeing %s — but waiting for the Gemini rate-limit window to clear (%.0fs).\n"
+                                    "Tap IDENTIFY NOW to bypass." % (s.watch_label or "object", backoff))
+                else:
+                    self.status.setText("LOOKING %.1fs" % s.watch_elapsed); self.status.setStyleSheet(_PILL_WATCHING)
+                    self._show_hint("Looking at %s... hold steady (%.1fs)" %
+                                    (s.watch_label or "?", s.watch_elapsed))
             elif s.state == "IDENTIFYING":
                 self.status.setText("IDENTIFYING…"); self.status.setStyleSheet(_PILL_IDENTIFYING)
                 self._show_hint("Identifying… (asking Gemini)")

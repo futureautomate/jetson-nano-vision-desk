@@ -27,7 +27,7 @@ log = logging.getLogger("vision.engine")
 # Per-frame snapshot the HUD/console consume.
 Snapshot = collections.namedtuple(
     "Snapshot",
-    "img dets fps state watch_label watch_elapsed result real_det gemini_on")
+    "img dets fps state watch_label watch_elapsed result real_det gemini_on backoff_remaining")
 
 # State constants
 S_IDLE        = "IDLE"
@@ -61,6 +61,9 @@ class Engine(object):
         self._gem_inflight = False
         self._gem_pending  = None        # (result_dict, jpeg_bytes) when a query returns
         self._gem_lock     = threading.Lock()
+        self._gem_blocked_until = 0.0    # back-off after a failure (Gemini 429 / network) so we
+                                         # don't slam the free-tier 20 RPM limit; reset on success
+        self._gem_backoff_s = float(os.environ.get("GEMINI_BACKOFF_S", "30"))
         self._manual_kick  = False
 
         log.info("engine (identify mode): detector=%s gemini=%s telegram=%s",
@@ -128,7 +131,9 @@ class Engine(object):
         with self._gem_lock:
             (res, jpeg), self._gem_pending = self._gem_pending, None
         if res is None:
-            log.info("[GEMINI] identification failed — back to idle")
+            # back off so we don't hammer the rate limit (free-tier gemini-2.5-flash is 20 RPM)
+            self._gem_blocked_until = time.time() + self._gem_backoff_s
+            log.info("[GEMINI] identification failed — backing off %.0fs", self._gem_backoff_s)
             self.state = S_IDLE
             self.watch_label = None
             return
@@ -150,10 +155,11 @@ class Engine(object):
                 # always pick up any finished Gemini query first
                 self._apply_pending()
 
-                # manual trigger short-circuits state
+                # manual trigger short-circuits state (and bypasses the back-off — user explicitly asked)
                 if self._manual_kick:
                     self._manual_kick = False
                     if prominent and not self._gem_inflight:
+                        self._gem_blocked_until = 0.0
                         self.watch_label = prominent["label"]
                         self.watch_start = now
                         self.state = S_IDENTIFYING
@@ -174,7 +180,8 @@ class Engine(object):
                         # different object — restart the watch
                         self.watch_label = prominent["label"]
                         self.watch_start = now
-                    elif (now - self.watch_start) >= self.stable_s and not self._gem_inflight:
+                    elif (now - self.watch_start) >= self.stable_s and not self._gem_inflight \
+                            and now >= self._gem_blocked_until:
                         self.state = S_IDENTIFYING
                         self._kick_off_gemini(img, self.watch_label)
 
@@ -197,10 +204,12 @@ class Engine(object):
                             self.result = None
 
                 watch_elapsed = (now - self.watch_start) if self.state == S_WATCHING else 0.0
+                backoff_remaining = max(0.0, self._gem_blocked_until - now)
                 yield Snapshot(img=img, dets=dets, fps=self.det.fps(),
                                state=self.state, watch_label=self.watch_label,
                                watch_elapsed=watch_elapsed, result=self.result,
-                               real_det=self.det.real, gemini_on=self.brain.enabled)
+                               real_det=self.det.real, gemini_on=self.brain.enabled,
+                               backoff_remaining=backoff_remaining)
         except KeyboardInterrupt:
             pass
 
