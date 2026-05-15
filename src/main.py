@@ -1,21 +1,18 @@
 """Jetson Nano Vision Desk — entry point.
 
-    python3 -m src.main             # print config (pin map, GPIO/Gemini availability)
-    python3 -m src.main --selftest  # exercise every actuator (lamp, servo sweep, buzzer)
-    python3 -m src.main --demo      # the loop: detectnet -> reflex reactions (+ Gemini if a key is set), console output
-    python3 -m src.main --hud       # same loop, but rendered on the PyQt5 HUD (the DWIN HDMI screen)
+    python3 -m src.main             # print config (camera / Gemini / Telegram availability)
+    python3 -m src.main --demo      # vision -> Gemini identify loop, console output
+    python3 -m src.main --hud       # ...rendered on the PyQt5 HUD (DWIN HDMI screen)
 
-Runs anywhere: on the Jetson it uses Jetson.GPIO + jetson-inference; on a laptop /
-CI (or with COMPANION_SIMULATE=1) it uses mock backends, so nothing here crashes.
+Runs anywhere: on the Jetson it uses jetson-inference; on a laptop / CI it uses
+a no-op mock Detector, so nothing here crashes. The Gemini and Telegram layers
+degrade gracefully (no key → disabled).
 """
 import argparse
 import logging
 import os
 import re
 import time
-
-from src.hardware import pins
-from src.hardware.board import gpio
 
 
 # --- tiny .env loader (no python-dotenv dependency; Py3.6-safe) -------------
@@ -42,54 +39,46 @@ def _load_env():
 
 
 def _print_config():
-    print("Jetson Nano Vision Desk")
+    print("Jetson Nano Vision Desk — Object Identifier")
     print("-" * 48)
-    print("GPIO backend :", "Jetson.GPIO (real)" if gpio.real else "MOCK (no hardware)")
-    print("Gemini       :", "enabled (key set)" if os.environ.get("GEMINI_API_KEY") else "disabled (no GEMINI_API_KEY)")
-    print("\nActuators:")
-    for name, spec in pins.ACTUATORS.items():
-        print("  {:<11} {:<12} pin {:<3}  {}".format(name, spec["iface"], spec["pin"], spec.get("desc", "")))
-    print("\nCamera: USB (jetson-inference detectnet on /dev/video0)  — install jetson-inference on the Nano")
+    print("Gemini       :", "enabled (key set)" if os.environ.get("GEMINI_API_KEY")
+          else "disabled (no GEMINI_API_KEY)")
+    print("Telegram     :", "enabled" if (os.environ.get("TELEGRAM_BOT_TOKEN")
+                                          and os.environ.get("TELEGRAM_CHAT_ID"))
+          else "disabled (no TELEGRAM_BOT_TOKEN/CHAT_ID)")
+    print("Camera       : USB (jetson-inference detectnet on /dev/video0)")
     print("-" * 48)
-
-
-def _selftest():
-    from src.hardware.actuators import Actuators
-    print("== SELFTEST ==  GPIO:", "Jetson.GPIO" if gpio.real else "MOCK")
-    act = Actuators()
-    try:
-        print("lamp ON");  act.lamp.on();  time.sleep(0.7)
-        print("lamp OFF"); act.lamp.off(); time.sleep(0.3)
-        print("mood light ON"); act.mood_light.on(); time.sleep(0.5)
-        print("mood light OFF"); act.mood_light.off(); time.sleep(0.3)
-        print("servo sweep ...")
-        for ang in (0, 45, 90, 135, 180, 90):
-            print("  servo -> %d" % ang); act.pointer.set_angle(ang); time.sleep(0.6)
-        print("buzzer beep");  act.buzzer.beep(0.15); time.sleep(0.4)
-        print("buzzer alert"); act.buzzer.alert(); time.sleep(1.2)
-        print("state:", act.state())
-        print("SELFTEST OK")
-        return 0
-    finally:
-        act.shutdown(); gpio.cleanup()
 
 
 def _demo():
-    """Vision -> reflex reactions (+ Gemini overlay if a key is set), printed to the console.
-    Same loop the HUD runs — see src/engine.py."""
-    from src.engine import Engine
+    """Run the identify loop with console output. Useful for headless dev / soak testing."""
+    from src.engine import Engine, S_SHOWING, S_WATCHING
     eng = Engine(draw_overlay=False)
     print("== DEMO ==  detector:", "real" if eng.det.real else "MOCK",
-          "| GPIO:", "real" if gpio.real else "MOCK", "| Gemini:", "on" if eng.brain.enabled else "off")
+          "| Gemini:", "on" if eng.brain.enabled else "off",
+          "| Telegram:", "on" if eng.notifier.enabled else "off")
     if not eng.det.real:
         print("(jetson-inference not installed here — install it on the Nano; this loop will idle)")
-    idle = 0.0 if eng.det.real else 0.5
+    idle = 0.0 if eng.det.real else 0.4
+    last_state = None
     try:
         for s in eng.run():
-            if s.dets:
-                print("fps=%.0f people=%d dets=%s lamp=%s servo=%.0f%s" % (
-                    s.fps, s.people, [d["label"] for d in s.dets][:6],
-                    s.state["lamp"], s.state["pointer_angle"], "  [PAUSED]" if s.paused else ""))
+            if s.state != last_state:
+                if s.state == S_WATCHING:
+                    print("watching '%s' (need %.1fs steady)..." % (s.watch_label, eng.stable_s))
+                elif s.state == "IDENTIFYING":
+                    print("identifying...")
+                last_state = s.state
+            if s.result and s.state == S_SHOWING:
+                r = s.result
+                print("\n== %s ==  [%s]" % (r["name"], r["kind"]))
+                print("  %s" % r["summary"])
+                for f in r["facts"]:
+                    print("   • %s" % f)
+                print("(remove the object from frame to scan another)\n")
+                # console demo: auto-clear so we can loop on another item
+                eng.clear()
+                last_state = None
             time.sleep(idle)
     finally:
         eng.shutdown()
@@ -103,24 +92,21 @@ def _hud():
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(prog="src.main", description="Jetson Nano Vision Desk")
+    p = argparse.ArgumentParser(prog="src.main", description="Jetson Nano Vision Desk — Object Identifier")
     g = p.add_mutually_exclusive_group()
-    g.add_argument("--selftest", action="store_true", help="exercise every actuator")
-    g.add_argument("--demo", action="store_true", help="run the vision -> reactions loop (console output)")
-    g.add_argument("--hud", action="store_true", help="run the loop with the PyQt5 HUD on the DWIN screen")
+    g.add_argument("--demo", action="store_true", help="vision -> Gemini identify loop (console)")
+    g.add_argument("--hud",  action="store_true", help="...on the PyQt5 HUD on the DWIN screen")
     p.add_argument("-v", "--verbose", action="store_true")
     args = p.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     _load_env()
-    if args.selftest:
-        return _selftest()
     if args.demo:
         return _demo()
     if args.hud:
         return _hud()
     _print_config()
-    print("\nRun:  --selftest (actuators) | --demo (vision loop, console) | --hud (vision loop, DWIN screen)")
+    print("\nRun:  --demo (console) | --hud (DWIN screen)")
     return 0
 
 

@@ -1,22 +1,14 @@
 # Python deps for the Jetson side. The Nano runs Python 3.6.9 — nothing modern needed.
-# (No Blinka/CircuitPython — incompatible with 3.6, and not needed here anyway.)
-
-# --- GPIO: relays, SG90 servo PWM, buzzer PWM ---
-Jetson.GPIO                 # preinstalled on JetPack; pip line is a no-op safety net
 
 # --- HUD on the 4.3" DWIN HDMI screen ---
 PyQt5                       # installed via apt on the Nano (python3-pyqt5); listed here for non-Jetson lint envs
 
-# --- cloud "brain" + alerts (plain HTTPS — works on Py 3.6) ---
+# --- cloud "brain" + Telegram logs (plain HTTPS — works on Py 3.6) ---
 requests
-python-telegram-bot
 
-# --- jetson-inference (detectnet/posenet) is NOT a pip package ---
+# --- jetson-inference (detectnet) is NOT a pip package ---
 # Build it from source on the Nano — installs the `jetson.inference` / `jetson.utils` Python
 # bindings system-wide, so the app runs natively. See README "First-time Jetson setup" and
 # scripts/jetson_bootstrap.sh for the exact steps (incl. the JetPack-4 libnpymath fixup).
 # https://github.com/dusty-nv/jetson-inference
 # (Docker alternative: `dustynv/jetson-inference:r32.7.1`, but then GPIO/HUD/systemd run inside it.)
-
-# --- handy locally; OpenCV is preinstalled on JetPack as python3-opencv ---
-# opencv-python   # only if you want it in a non-Jetson dev env

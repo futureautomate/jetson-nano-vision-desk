@@ -1,13 +1,12 @@
-"""The "brain" layer — periodically ask Gemini to reason about the scene.
+"""The "brain" layer — ask Gemini to identify an object held up to the camera.
 
 A plain HTTPS POST to the Generative Language API (works on the Nano's Python 3.6
-with only `requests`). Sends a downscaled JPEG frame + the current detections,
-asks for STRICT JSON: a one-line scene description + an action decision. Returns
-a dict; on any error/timeout it returns None and the caller keeps using the local
-reflex rules (graceful degradation).
+with only `requests`). Sends a downscaled JPEG frame + a hint label from the
+on-device detector, asks for STRICT JSON with the object's name + kind + summary
++ 3–5 facts. Returns a dict; on any error/timeout returns None.
 
 Config via env (see .env.example): GEMINI_API_KEY, GEMINI_MODEL (default
-gemini-2.5-flash — NOT gemini-2.0-flash), GEMINI_INTERVAL_S.
+gemini-2.5-flash — NOT gemini-2.0-flash).
 """
 import base64
 import json
@@ -19,26 +18,30 @@ log = logging.getLogger("vision.brain")
 
 _ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
 
-_SYSTEM = (
-    "You are the reasoning layer of a Jetson Nano 'vision desk' device. You receive a "
-    "camera frame of someone's desk plus a list of on-device detections. Decide what the "
-    "device should do. Reply with STRICT JSON only, no markdown, with this exact shape:\n"
-    '{"scene": "<one short sentence describing what is happening>",\n'
-    ' "lamp": <true|false>,            // should the desk lamp be on?\n'
-    ' "point_at": "<label or null>",   // which detected object the pointer arm should aim at\n'
-    ' "alert": <true|false>,           // raise a buzzer/notification alert?\n'
-    ' "status": "idle"|"active"|"alert",\n'
-    ' "say": "<short note for the on-screen HUD>"}\n'
-    "Note: the device ALREADY switches the desk lamp on automatically whenever a person is at the "
-    "desk — set lamp=true only if extra light would help even otherwise (e.g. someone reading in a "
-    "dim room); lamp=false is fine the rest of the time. Be conservative with alert=true: only for "
-    "something genuinely unusual (e.g. an unfamiliar person lingering and facing the camera)."
+_SYSTEM_IDENTIFY = (
+    "You are an object-identification assistant for a desk camera. The user holds up a single "
+    "physical item — could be a book, gadget, consumer product, food package, art piece, tool, "
+    "plant, lego build, currency, anything. Identify it and give a useful, concrete description.\n"
+    "Reply with STRICT JSON only, no markdown, with this exact shape:\n"
+    '{"name": "<one short line: the item\'s name or best-guess identity>",\n'
+    ' "kind": "book|product|electronics|food|tool|art|toy|plant|currency|household|other",\n'
+    ' "summary": "<one sentence describing what it is>",\n'
+    ' "facts": ["<short fact>", "<short fact>", "<short fact>"]}\n'
+    "Make 3–5 facts, each one a short SPECIFIC line (not a paragraph). Tailor to the kind:\n"
+    "  BOOK         → author · year · what it's about · why it matters\n"
+    "  PRODUCT      → brand · model · what it does · key feature · ballpark price\n"
+    "  ELECTRONICS  → brand · model · chip / specs · common uses\n"
+    "  FOOD         → brand · what it is · calories ballpark · origin · dietary notes\n"
+    "  TOOL         → type · common uses · material/build · brand if visible\n"
+    "  ART / OTHER  → artist/origin if known · medium · period/style · notable detail\n"
+    "If you can't identify the exact item, name what's visible (e.g. 'a green ceramic mug') "
+    "and give general facts about the category. NEVER refuse or apologise — always return JSON."
 )
 
 
 class GeminiBrain(object):
-    def __init__(self, api_key=None, model=None, timeout_s=12):
-        self.api_key = api_key or os.environ.get("GEMINI_API_KEY", "").strip()
+    def __init__(self, api_key=None, model=None, timeout_s=15):
+        self.api_key = (api_key or os.environ.get("GEMINI_API_KEY", "")).strip()
         self.model = (model or os.environ.get("GEMINI_MODEL", "") or "gemini-2.5-flash").strip()
         self.timeout_s = timeout_s
         self.enabled = bool(self.api_key)
@@ -51,18 +54,19 @@ class GeminiBrain(object):
                 log.warning("`requests` not available (%s) — Gemini brain disabled", e)
                 self.enabled = False
         if not self.enabled:
-            log.info("Gemini brain disabled (no GEMINI_API_KEY / no requests) — local reflexes only")
+            log.info("Gemini brain disabled (no GEMINI_API_KEY / no requests)")
         else:
             log.info("Gemini brain enabled — model %s", self.model)
 
-    def think(self, jpeg_bytes, detections):
-        """Return a decision dict, or None on any failure."""
+    def identify(self, jpeg_bytes, hint_label=None):
+        """Identify the object visible in the frame. Returns
+            {"name", "kind", "summary", "facts":[...], "ts"} on success, or None on failure.
+        """
         if not self.enabled:
             return None
-        det_summary = [{"label": d["label"], "conf": round(d["confidence"], 2),
-                        "cx": round(d["cx"], 2), "area": round(d["area"], 3)} for d in detections]
-        parts = [{"text": _SYSTEM},
-                 {"text": "Detections: " + json.dumps(det_summary)}]
+        parts = [{"text": _SYSTEM_IDENTIFY}]
+        if hint_label:
+            parts.append({"text": "Hint: my on-device detector classified the object as a '%s'." % hint_label})
         if jpeg_bytes:
             parts.append({"inline_data": {"mime_type": "image/jpeg",
                                           "data": base64.b64encode(jpeg_bytes).decode("ascii")}})
@@ -72,25 +76,21 @@ class GeminiBrain(object):
         try:
             r = self._requests.post(url, json=body, timeout=self.timeout_s)
             if r.status_code != 200:
-                log.warning("Gemini HTTP %s: %s", r.status_code, r.text[:200])
+                log.warning("Gemini HTTP %s: %s", r.status_code, r.text[:300])
                 return None
             data = r.json()
             txt = data["candidates"][0]["content"]["parts"][0]["text"]
-            decision = json.loads(txt)
-            return self._normalize(decision)
+            return self._normalize(json.loads(txt))
         except Exception as e:
             log.warning("Gemini call failed: %s", e)
             return None
 
     @staticmethod
     def _normalize(d):
-        out = {
-            "scene": str(d.get("scene", ""))[:200],
-            "lamp": bool(d.get("lamp", False)),
-            "point_at": (str(d["point_at"]) if d.get("point_at") not in (None, "", "null") else None),
-            "alert": bool(d.get("alert", False)),
-            "status": d.get("status") if d.get("status") in ("idle", "active", "alert") else "idle",
-            "say": str(d.get("say", ""))[:200],
-            "ts": time.time(),
+        return {
+            "name":    str(d.get("name", "Unknown"))[:200],
+            "kind":    (str(d.get("kind", "other")).lower())[:32],
+            "summary": str(d.get("summary", ""))[:400],
+            "facts":   [str(f)[:200] for f in (d.get("facts") or []) if f][:6],
+            "ts":      time.time(),
         }
-        return out
