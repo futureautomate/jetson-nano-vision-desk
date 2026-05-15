@@ -12,6 +12,12 @@ States:  IDLE → WATCHING → IDENTIFYING → SHOWING → IDLE
 Runs anywhere: real Detector on the Jetson, mock elsewhere; degrades to
 local-only (no identification) if Gemini's key/network is gone.
 """
+# IMPORTANT: cv2 must be imported BEFORE any jetson-inference / jetson-utils symbols,
+# otherwise on aarch64 you hit `ImportError: libgomp.so.1: cannot allocate memory in
+# static TLS block` the first time cv2 loads — CUDA eats the TLS slots first.
+# (LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libgomp.so.1 in the systemd unit is a belt-and-braces.)
+import cv2  # noqa: F401  (must be the very first non-stdlib import)
+
 import collections
 import logging
 import os
@@ -98,19 +104,28 @@ class Engine(object):
         return max(cand, key=lambda d: d["area"] * d["confidence"]) if cand else None
 
     def _grab_jpeg(self, img):
-        """Downscaled JPEG for Gemini. Cheap; loop thread."""
-        if not (self.det.real and img is not None):
+        """JPEG of the current frame for Gemini. Loop thread, cheap. Sends the camera's native
+        resolution at high JPEG quality — Gemini needs the detail to read brand markings."""
+        if not self.det.real:
+            log.warning("_grab_jpeg: detector is mock, returning None")
+            return None
+        if img is None:
+            log.warning("_grab_jpeg: img is None, returning None")
             return None
         try:
             import jetson.utils as ju   # type: ignore
-            import cv2                   # type: ignore
+            # cv2 already imported at module top (before CUDA libs — fixes aarch64 TLS issue)
             arr = ju.cudaToNumpy(img)
-            small = cv2.resize(arr, (640, 360))
-            code = cv2.COLOR_RGBA2BGR if (small.ndim == 3 and small.shape[2] == 4) else cv2.COLOR_RGB2BGR
-            ok, buf = cv2.imencode(".jpg", cv2.cvtColor(small, code))
-            return buf.tobytes() if ok else None
+            code = cv2.COLOR_RGBA2BGR if (arr.ndim == 3 and arr.shape[2] == 4) else cv2.COLOR_RGB2BGR
+            bgr = cv2.cvtColor(arr, code)
+            ok, buf = cv2.imencode(".jpg", bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+            if not ok:
+                log.warning("_grab_jpeg: cv2.imencode returned False")
+                return None
+            return buf.tobytes()
         except Exception as e:
-            log.debug("frame->jpeg failed: %s", e)
+            log.warning("_grab_jpeg failed: %r (arr shape=%s)", e,
+                        getattr(arr, "shape", "?") if "arr" in dir() else "n/a")
             return None
 
     def _kick_off_gemini(self, img, hint_label):
@@ -118,6 +133,13 @@ class Engine(object):
             return
         self._gem_inflight = True
         jpeg = self._grab_jpeg(img)
+        if jpeg:
+            try:
+                # debug: dump the exact JPEG we're handing Gemini, so we can see what it saw
+                with open("/tmp/last_gemini_input.jpg", "wb") as f:
+                    f.write(jpeg)
+            except Exception:
+                pass
         threading.Thread(target=self._gem_request, args=(jpeg, hint_label), daemon=True).start()
 
     def _gem_request(self, jpeg, hint_label):
