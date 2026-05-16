@@ -2,8 +2,6 @@
 
 A Jetson Nano with a webcam and a small HDMI screen. Hold an object up to the camera — a book, a phone, a coffee bag, a Lego brick, a tool, a banknote — and the Nano figures out *what it is* and shows you the details on the screen. **Fast on-device detection triggers the call; a cloud multimodal AI does the recognition.**
 
-> Project brief & build phases: Notion → *Future Automation — Mission Control › Project Tracker › "Jetson Nano Vision Desk"*.
-
 ---
 
 ## How it works — two layers, one job
@@ -41,8 +39,21 @@ State machine: `IDLE → WATCHING → IDENTIFYING → SHOWING → IDLE` (when th
 
 ## Where things run
 
-- **This repo (Windows, `D:\Projects\jetson-nano-vision-desk`)** — source of truth; authored here, pushed to GitHub (`git@github-work:futureautomate/jetson-nano-vision-desk.git`, public, **work** account).
-- **Jetson Nano** — runs it. Reached over SSH as host `jetson` (`192.168.0.74`). Code at `~/jetson-vision-desk/`; runtime state (logs, snapshots, `.env`) at `~/jetson-vision-desk-data/`.
+- **Your dev machine** (Windows / Linux / macOS) — clone, edit, push. Deploy scripts ship for PowerShell (`deploy.ps1`) and POSIX shell (`deploy.sh`).
+- **Jetson Nano** — runs the loop. Reached over SSH as the host alias `jetson` (set this up yourself in `~/.ssh/config`; override on the fly with `-RemoteHost myhost` or `REMOTE=myhost`). Code lives at `~/jetson-vision-desk/`; runtime state (logs, snapshots, `.env`) at `~/jetson-vision-desk-data/`.
+
+### Quick SSH setup
+
+Add this to `~/.ssh/config` on your dev machine — replace `JETSON_IP_OR_HOSTNAME` and `USER` with your own values:
+
+```sshconfig
+Host jetson
+    HostName JETSON_IP_OR_HOSTNAME
+    User USER
+    IdentityFile ~/.ssh/id_ed25519
+```
+
+Then `ssh-copy-id jetson` once for passwordless login.
 
 ### Deploy / run
 
