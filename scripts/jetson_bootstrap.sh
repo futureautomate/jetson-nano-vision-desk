@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # One-shot device setup for the Jetson Nano side of Vision Desk.
-# Run it FROM the deployed repo on the Jetson:
-#     ssh jetson 'cd ~/jetson-vision-desk && bash scripts/jetson_bootstrap.sh'
+# Run it on the Jetson, from the cloned repo dir:
+#     cd ~/jetson-vision-desk && bash scripts/jetson_bootstrap.sh
+# (If you're using the optional dev-machine deploy flow, the equivalent is:
+#     ssh jetson 'cd ~/jetson-vision-desk && bash scripts/jetson_bootstrap.sh')
 # Safe to re-run. It does NOT install jetson-inference (see the note at the end).
 set -euo pipefail
 

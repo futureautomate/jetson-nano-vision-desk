@@ -39,46 +39,24 @@ State machine: `IDLE → WATCHING → IDENTIFYING → SHOWING → IDLE` (when th
 
 ## Where things run
 
-- **Your dev machine** (Windows / Linux / macOS) — clone, edit, push. Deploy scripts ship for PowerShell (`deploy.ps1`) and POSIX shell (`deploy.sh`).
-- **Jetson Nano** — runs the loop. Reached over SSH as the host alias `jetson` (set this up yourself in `~/.ssh/config`; override on the fly with `-RemoteHost myhost` or `REMOTE=myhost`). Code lives at `~/jetson-vision-desk/`; runtime state (logs, snapshots, `.env`) at `~/jetson-vision-desk-data/`.
+**Everything runs on the Nano.** Code lives at `~/jetson-vision-desk/`, runtime state (logs, snapshots, `.env`) at `~/jetson-vision-desk-data/`. The HUD renders on whatever HDMI display is attached to the Nano's HDMI port. There is no host-side runtime — your laptop doesn't need to be in the loop once the Nano is set up.
 
-### Quick SSH setup
-
-Add this to `~/.ssh/config` on your dev machine — replace `JETSON_IP_OR_HOSTNAME` and `USER` with your own values:
-
-```sshconfig
-Host jetson
-    HostName JETSON_IP_OR_HOSTNAME
-    User USER
-    IdentityFile ~/.ssh/id_ed25519
-```
-
-Then `ssh-copy-id jetson` once for passwordless login.
-
-### Deploy / run
-
-```powershell
-./deploy.ps1            # one-way Windows → Jetson sync (rsync, else tar-over-SSH) → jetson:~/jetson-vision-desk
-./deploy.ps1 -Run       # ...then run  python3 -m src.main  on the Jetson
-./deploy.ps1 -Clean     # wipe ~/jetson-vision-desk first (handles deleted files)
-```
-```bash
-./deploy.sh             # same, from Git Bash / WSL / macOS
-ssh jetson 'cd ~/jetson-vision-desk && python3 -m src.main'                                                  # print config
-ssh jetson 'cd ~/jetson-vision-desk && python3 -m src.main --demo'                                           # identify loop, console
-ssh jetson 'cd ~/jetson-vision-desk && DISPLAY=:0 XAUTHORITY=/run/user/1000/gdm/Xauthority python3 -m src.main --hud'  # ...with the HUD on the DWIN screen
-```
+The setup below clones the repo directly on the Nano. If you'd rather edit on your laptop and sync changes over SSH, see **"Optional: develop from a dev machine"** further down.
 
 ## First-time Jetson setup
 
-```bash
-# 1. get the code there (deploy.ps1, or `git clone https://github.com/futureautomate/jetson-nano-vision-desk.git`)
+All commands run **on the Jetson** (over SSH or directly at the desktop):
 
-# 2. OS + Python deps:
-ssh jetson 'cd ~/jetson-vision-desk && bash scripts/jetson_bootstrap.sh'
+```bash
+# 1. clone the repo onto the Nano
+git clone https://github.com/futureautomate/jetson-nano-vision-desk.git ~/jetson-vision-desk
+cd ~/jetson-vision-desk
+
+# 2. OS + Python deps (apt + pip)
+bash scripts/jetson_bootstrap.sh
 
 # 3. build jetson-inference FROM SOURCE — installs the `jetson.inference` / `jetson.utils`
-#    Python bindings system-wide, so the app runs natively (HUD + systemd stay simple). On the Jetson:
+#    Python bindings system-wide, so the app runs natively (HUD + systemd stay simple).
 git clone --depth=1 https://github.com/dusty-nv/jetson-inference ~/jetson-inference
 cd ~/jetson-inference
 git submodule update --init --recursive utils tools/camera-capture c/plugins/pose
@@ -90,24 +68,43 @@ make -j2 && sudo make install && sudo ldconfig
 python3 -c 'import jetson.inference, jetson.utils; print("bindings ok")'
 #    (first detectNet(...) call downloads SSD-Mobilenet-v2 + builds a TensorRT engine, ~5 min, cached after)
 
-# 4. put the Gemini key in ~/jetson-vision-desk-data/.env  (see .env.example)
-#    GEMINI_API_KEY=...     GEMINI_MODEL=gemini-2.5-flash
-#    optional: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+# 4. fill in your keys (the bootstrap in step 2 already created this from .env.example)
+#       GEMINI_API_KEY=...                      (required for actual identifications)
+#       GEMINI_MODEL=gemini-2.5-flash
+#       TELEGRAM_BOT_TOKEN=...                  (optional — snapshot per scan to your phone)
+#       TELEGRAM_CHAT_ID=...                    (optional)
+nano ~/jetson-vision-desk-data/.env
 
-# 5. install + enable the systemd units (see systemd/README.md)
+# 5. smoke test — runs the identify loop with console output (no HUD)
+cd ~/jetson-vision-desk
+python3 -m src.main --demo
+
+# 6. install + enable systemd units so the HUD autostarts at boot (see systemd/README.md)
 sudo cp ~/jetson-vision-desk/systemd/*.service /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl enable --now jetson-clocks jetson-vision-desk
+sudo systemctl daemon-reload
+sudo systemctl enable --now jetson-clocks jetson-vision-desk
 
-# 6. perf: `sudo nvpmodel -m 0 && sudo jetson_clocks` for full speed — only if the 5V rail
-#    doesn't sag under load (see Performance), otherwise leave it in the default 5W mode.
+# 7. (optional) full-speed perf — only if your 5V rail is stiff (≥ 4.9V at the barrel jack
+#    under load); otherwise leave the default 5W mode.
+sudo nvpmodel -m 0 && sudo jetson_clocks
 ```
 
-The Nano: JetPack 4.6.x / Ubuntu 18.04 / Python 3.6 / CUDA 10.2 — on-device TensorRT vision is its strength; the Gemini call is just HTTPS so Py 3.6 is fine.
+The Nano: JetPack 4.6.x / Ubuntu 18.04 / Python 3.6 / CUDA 10.2 — on-device TensorRT vision is its strength; the Gemini call is plain HTTPS so Py 3.6 is fine.
+
+### Run modes
+
+```bash
+python3 -m src.main           # prints config + exits (sanity check)
+python3 -m src.main --demo    # identify loop, console output (good for headless / SSH)
+python3 -m src.main --hud     # ...with the PyQt5 HUD on the attached HDMI display
+```
+
+`--hud` needs an X session — if you boot to console, stick with `--demo`, or use the systemd unit from step 6 (it handles `DISPLAY` / `XAUTHORITY` for you).
 
 ## Repo layout
 
 ```
-deploy.ps1 / deploy.sh         # Windows ↔ Jetson sync
+deploy.ps1 / deploy.sh         # OPTIONAL — dev-machine → Jetson sync (see below)
 .env.example                   # copy → .env (gitignored): GEMINI_API_KEY, TELEGRAM_*, tuning
 docs/hardware.md               # the three components
 scripts/jetson_bootstrap.sh    # device setup (apt, pip)
@@ -121,6 +118,48 @@ src/
   notify/telegram.py           # per-scan snapshot + caption to your Telegram bot (async, cooldown-debounced)
 requirements.txt
 ```
+
+## Optional: develop from a dev machine
+
+If you'd rather edit code in your usual IDE on Windows / Linux / macOS and push changes over SSH (instead of editing on the Nano directly), use the included deploy scripts. Everything else — the bootstrap, `jetson-inference` build, `.env`, systemd units — still runs on the Nano exactly as in the "First-time Jetson setup" above.
+
+### 1. SSH alias on your dev machine
+
+Add this to `~/.ssh/config` (or `%USERPROFILE%\.ssh\config` on Windows) — replace `JETSON_IP_OR_HOSTNAME` and `USER`:
+
+```sshconfig
+Host jetson
+    HostName JETSON_IP_OR_HOSTNAME
+    User USER
+    IdentityFile ~/.ssh/id_ed25519
+```
+
+Then `ssh-copy-id jetson` once for passwordless login.
+
+### 2. Sync the repo to the Nano
+
+```powershell
+./deploy.ps1            # one-way sync (rsync if available, else tar-over-SSH) → jetson:~/jetson-vision-desk
+./deploy.ps1 -Run       # ...then run python3 -m src.main on the Jetson
+./deploy.ps1 -Clean     # wipe ~/jetson-vision-desk first (handles deleted files)
+./deploy.ps1 -RemoteHost myhost   # override the SSH host alias
+```
+
+```bash
+./deploy.sh             # same, from Git Bash / WSL / Linux / macOS
+./deploy.sh --run
+./deploy.sh --clean
+REMOTE=myhost ./deploy.sh
+```
+
+### 3. Run / restart on the Nano after a sync
+
+```bash
+ssh jetson 'cd ~/jetson-vision-desk && python3 -m src.main --demo'        # console output
+ssh jetson 'sudo systemctl restart jetson-vision-desk'                    # if the service is installed
+```
+
+After the first sync, finish the rest of "First-time Jetson setup" on the Nano (bootstrap, `jetson-inference` build, `.env`, systemd units). Subsequent edits are just `./deploy.ps1` (or `./deploy.sh`) followed by a service restart.
 
 ## Performance
 
